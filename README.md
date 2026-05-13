@@ -79,7 +79,7 @@ my $client = FileServerSdk::Client->new();
 # For the JavaScript, import the modified dropzone with S3 support (coming soon...)
 
 # In your Perl module, call $client->handle_generate_presigned_urls(...) to process incoming api requests when the current URL is hit:
-my $action = CGP::param('action'); # 'success' or 'error'
+my $action = CGI::param('action'); # 'success' or 'error'
 if ($action eq 'generate_presigned_urls') {
   my @file_placeholders = $client->handle_generate_presigned_urls(
     bucket => 'your_bucket_name',
@@ -150,7 +150,7 @@ my $pipeline_id = $client->execute_pipeline(
 );
 
 # In your Perl module, call $client->handle_webhook() to process incoming webhook requests when the given webhook URL is hit by the pipeline server:
-my $action = CGP::param('action'); # 'success' or 'error'
+my $action = CGI::param('action'); # 'success' or 'error'
 if ($action eq 'webhook') {
   $client->handle_webhook();
 }
