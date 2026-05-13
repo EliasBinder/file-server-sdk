@@ -202,8 +202,7 @@ sub handle_webhook {
 }
 
 sub handle_generate_presigned_urls {
-    my ( $self, $bucket, $content_types, $num_files, $expires_in, $on_finish )
-      = @_;
+    my ( $self, $bucket, $content_types, $num_files, $expires_in ) = @_;
 
     die "bucket is required\n" unless defined $bucket;
 
@@ -270,11 +269,7 @@ sub handle_generate_presigned_urls {
     print "Content-Type: application/json\n\n";
     print $response_json;
 
-    if ( defined $on_finish && ref($on_finish) eq 'CODE' ) {
-        $on_finish->( \@presigned_urls );
-    }
-
-    return 1;
+    return \@presigned_urls;
 }
 
 # Private helper function for UUID generation

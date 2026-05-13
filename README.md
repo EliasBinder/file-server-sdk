@@ -11,21 +11,19 @@ A powerful Perl SDK for interacting with the File Server and Pipeline management
 - [Examples](#examples)
 - [Testing](#testing)
 - [Requirements](#requirements)
-- [Contributing](#contributing)
-- [License](#license)
 
 ## Installation
 
 ### Via CPAN
 
 ```bash
-cpan File::Server::SDK
+cpan https://github.com/EliasBinder/file-server-sdk.git
 ```
 
 ### Manual Installation
 
 ```bash
-git clone https://github.com/yourusername/file-server-sdk.git
+git clone git@github.com:EliasBinder/file-server-sdk.git
 cd file-server-sdk
 perl Makefile.PL
 make
@@ -36,7 +34,7 @@ make install
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/file-server-sdk.git
+git clone git@github.com:EliasBinder/file-server-sdk.git
 cd file-server-sdk
 perl Makefile.PL
 make
@@ -54,7 +52,47 @@ export SECRET_ACCESS_KEY="your_api_secret"
 export PIPELINE_SHARED_SECRET="your_pipeline_shared_secret"
 ```
 
-### 2. Create a Simple Pipeline
+### 2. Setup the Client
+
+```perl
+use FileServerSdk::Client;
+
+my $client = FileServerSdk::Client->new();
+```
+
+### 3. Use Net::Amazon::S3 Client directly if needed:
+
+```perl
+my $s3_client = $client->s3();
+
+# Use $s3_client for direct S3 operations if necessary
+```
+
+### 5. Allow a browser to upload files to S3 using a presigned URL:
+
+```perl
+use FileServerSdk::Client;
+
+# Initialize client
+my $client = FileServerSdk::Client->new();
+
+# For the JS, import the modified dropzone with S3 support (coming soon)
+
+# In your Perl module, call $client->handle_webhook() to process incoming webhook requests when the given webhook URL is hit by the pipeline server:
+my $action = CGP::param('action'); # 'success' or 'error'
+if ($action eq 'generate_presigned_urls') {
+  my @file_placeholders = $client->handle_generate_presigned_urls(
+    bucket => 'your_bucket_name',
+    content_types => ['application/pdf', 'image/jpeg'], # Optional, specify allowed content types
+    num_files => 5, # Optional, specify max number of presigned URLs to generate
+    expires_in => 3600 # Optional, specify expiration time in seconds (default 1 hour)
+  );
+
+  # E.g. Start a pipeline with the generated presigned URLs as input files, etc.
+}
+```
+
+### 4. Create a Simple Pipeline for Merging PDFs and other file processing tasks:
 
 ```perl
 use FileServerSdk::Client;
@@ -66,8 +104,8 @@ my $client = FileServerSdk::Client->new();
 
 # Create a task
 my $task = FileServerSdk::Tasks::PdfMergerTask->new(
-    input_files => ['document1.pdf', 'document2.pdf'],
-    output_file => 'merged.pdf'
+    input_files => ['bucket/document1.pdf', 'bucket/document2.pdf'],
+    output_file => 'bucket/merged.pdf'
 );
 
 # Create a sequential pipeline with the task
@@ -79,7 +117,7 @@ my $pipeline_id = $client->execute_pipeline($pipeline);
 print "Pipeline ID: $pipeline_id\n";
 ```
 
-### 3. Execute with Webhooks
+### 5. Execute a Pipeline with Webhooks (Get the final result of the pipeline execution)
 
 ```perl
 use FileServerSdk::Client;
@@ -99,7 +137,7 @@ my $pipeline = FileServerSdk::SequentialPipeline->new()
 # Execute with webhook callbacks
 my $pipeline_id = $client->execute_pipeline(
     $pipeline,
-    'https://your-server.com/webhook',
+    'https://your-server.com/some-path?action=webhook',
     sub {
         # Success callback
         print "Pipeline completed successfully!\n";
@@ -111,7 +149,11 @@ my $pipeline_id = $client->execute_pipeline(
     }
 );
 
-print "Pipeline ID: $pipeline_id\n";
+# In your Perl module, call $client->handle_webhook() to process incoming webhook requests when the given webhook URL is hit by the pipeline server:
+my $action = CGP::param('action'); # 'success' or 'error'
+if ($action eq 'webhook') {
+  $client->handle_webhook();
+}
 ```
 
 ## Core Concepts
@@ -258,6 +300,42 @@ if ($result) {
     print "Webhook processed\n";
 }
 ```
+
+##### `handle_generate_presigned_urls($bucket, [$content_types, $num_files, $expires_in, $on_finish])`
+
+Generate presigned URLs for S3 uploads. Reads file information from CGI parameters and generates signed URLs.
+
+**Parameters:**
+- `$bucket` - S3 bucket name (required)
+- `$content_types` - Array reference of allowed MIME types (optional)
+- `$num_files` - Expected number of files (optional)
+- `$expires_in` - URL expiration time in seconds (optional, default 3600)
+- `$on_finish` - Code reference callback when finished (optional)
+
+**Returns:** 1 on success, 0 on failure
+
+**Example:**
+
+```perl
+# Generate presigned URLs for file uploads
+my $result = $client->handle_generate_presigned_urls(
+    bucket => 'my-bucket',
+    content_types => ['application/pdf', 'image/jpeg'],
+    num_files => 5,
+    expires_in => 7200,
+    on_finish => sub {
+        my ($presigned_urls) = @_;
+        # Handle generated URLs
+    }
+);
+
+if ($result) {
+    print "Presigned URLs generated\n";
+}
+```
+
+**Expected CGI Parameters:**
+- `files` - JSON array of file objects with `index` and `content_type` properties
 
 ### FileServerSdk::SequentialPipeline
 
@@ -416,9 +494,9 @@ Serialize the task to JSON.
 **Returns:** Hash reference with structure:
 ```perl
 {
-    type        => 'pdf_merger',
-    input_files => [...],
-    output_file => '...'
+    type       => 'pdf_merger',
+    inputFiles => [...],     # Array reference of input file names
+    outputFile => '...'      # Output file name
 }
 ```
 
@@ -835,49 +913,7 @@ my $task = FileServerSdk::Tasks::PdfMergerTask->new(
 2. Check S3 host configuration
 3. Ensure network connectivity to S3
 
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Write tests for new functionality
-4. Ensure all tests pass (`prove t/`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-## License
-
-This project is licensed under the Perl License (Artistic License 2.0 / GPL 2.0).
-
-## Support
-
-For issues, questions, or suggestions:
-
-1. Check existing documentation in `README.md` and `t/README.md`
-2. Review test examples in `t/` directory
-3. Open an issue on GitHub
-4. Contact the maintainers
-
-## Changelog
-
-See `CHANGELOG.md` for version history and updates.
-
-## Roadmap
-
-Planned features:
-
-- [ ] Additional task types (image processing, video conversion)
-- [ ] Async/await support
-- [ ] Connection pooling
-- [ ] Caching layer
-- [ ] Extended error handling
-- [ ] Rate limiting support
-
----
-
 **Version:** 1.0.0  
-**Last Updated:** 2024  
+**Last Updated:** 2026
 **Author:** Elias Binder  
 **Repository:** https://github.com/yourusername/file-server-sdk
