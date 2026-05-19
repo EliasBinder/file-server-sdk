@@ -19,7 +19,8 @@ RUN cpanm --notest \
     JSON \
     HTTP::Tiny \
     CGI \
-    Moose
+    Moose \
+    Digest::SHA
 
 # Tell Apache to pass your custom environment variables to CGI scripts
 RUN echo "PassEnv ACCESS_KEY_ID" >> /etc/apache2/apache2.conf \
@@ -28,6 +29,12 @@ RUN echo "PassEnv ACCESS_KEY_ID" >> /etc/apache2/apache2.conf \
 
 ENV PERL5LIB=/usr/local/share/perl/lib:/usr/local/lib/perl5/site_perl/5.40.4
 RUN echo "PassEnv PERL5LIB" >> /etc/apache2/apache2.conf
+
+# Pass the correct 5.40.4 site_perl path to Apache's CGI daemon
+RUN echo "SetEnv PERL5LIB /usr/local/share/perl/lib:/usr/local/lib/perl5/site_perl/5.40.4" >> /etc/apache2/apache2.conf
+
+# Keep the ServerName fix to suppress the warning log
+RUN echo "ServerName localhost" >> /etc/apache2/apache2.conf
 
 # Copy and install dependencies
 COPY cpanfile .

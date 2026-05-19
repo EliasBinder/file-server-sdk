@@ -14,7 +14,7 @@ if ( $action eq 'html' ) {
     serve_html();
 }
 elsif ( $action eq 'get_presigned_urls' ) {
-    $client->handle_generate_presigned_urls();
+    $client->handle_generate_presigned_urls("test");
 }
 elsif ( $action eq 'webhook' ) {
     $client->handle_webhook();
