@@ -7,6 +7,10 @@ FROM perl:5.40
 RUN apt-get update && apt-get install -y \
     apache2 \
     libapache2-mod-perl2 \
+    make \
+    gcc \
+    libc6-dev \
+    libmoose-perl \
     && rm -rf /var/lib/apt/lists/*
 
 # Enable CGI module in Apache config
@@ -14,7 +18,7 @@ RUN a2enmod cgid
 
 # Pre-install your SDK's heavy dependencies to speed up future runs.
 # Use --notest because running S3 test suites during a Docker build takes forever.
-RUN cpanm --notest \
+RUN /usr/bin/perl /usr/local/bin/cpanm --notest \
     Net::Amazon::S3 \
     JSON \
     HTTP::Tiny \
@@ -40,6 +44,8 @@ RUN echo "ServerName localhost" >> /etc/apache2/apache2.conf
 COPY cpanfile .
 RUN cpanm --notest --installdeps .
 
+RUN chmod -R o+rx /usr/local/lib/perl5/site_perl/
+
 # Configure Apache to foreground execute (so Docker can manage it)
 ENV APACHE_RUN_USER=www-data
 ENV APACHE_RUN_GROUP=www-data
@@ -49,6 +55,11 @@ ENV APACHE_RUN_DIR=/var/run/apache2
 ENV APACHE_LOCK_DIR=/var/lock/apache2
 
 RUN mkdir -p $APACHE_RUN_DIR $APACHE_LOCK_DIR $APACHE_LOG_DIR
+
+# Create directories and link logs to console stdout/stderr
+RUN mkdir -p $APACHE_RUN_DIR $APACHE_LOCK_DIR $APACHE_LOG_DIR \
+    && ln -sf /dev/stdout /var/log/apache2/access.log \
+    && ln -sf /dev/stderr /var/log/apache2/error.log
 
 # Expose HTTP port
 EXPOSE 80

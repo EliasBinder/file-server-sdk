@@ -393,7 +393,13 @@ sub handle_generate_presigned_urls {
           };
     }
 
-    my $response_json = $self->{json}->encode( \@presigned_urls );
+    my $response_json = $self->{json}->encode(
+        {
+            success   => JSON::true,
+            timestamp => time(),
+            urls      => \@presigned_urls,
+        }
+    );
     print "Content-Type: application/json\n\n";
     print $response_json;
 

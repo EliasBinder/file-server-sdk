@@ -12,12 +12,15 @@ my $client = FileServerSdk::Client->new();
 
 if ( $action eq 'html' ) {
     serve_html();
+    return 1;
 }
-elsif ( $action eq 'get_presigned_urls' ) {
+elsif ( $action eq 'generate_presigned_urls' ) {
     $client->handle_generate_presigned_urls("test");
+    return 1;
 }
 elsif ( $action eq 'webhook' ) {
     $client->handle_webhook();
+    return 1;
 }
 elsif ( $action eq 'form_submit' ) {
     print "Content-type: text/plain; charset=UTF-8\n\n";
@@ -39,7 +42,7 @@ sub serve_html {
         <fs-dropzone action-name="ACTION"></fs-dropzone>
         <input type="submit" value="Upload to S3" style="margin-top: 40px" />
     </form>
-    <script type="module" src="https://cdn.jsdelivr.net/gh/EliasBinder/file-server-dropzone\@main/dist/fsdropzone.es.js"></script>
+    <script type="module" src="https://cdn.jsdelivr.net/gh/EliasBinder/file-server-dropzone\@main/dist/fsdropzone.es.js?v=1.0.5"></script>
     $;
     print $content;
 

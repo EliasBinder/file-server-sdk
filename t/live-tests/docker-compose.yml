@@ -11,4 +11,4 @@ services:
       # 1. Map your test scripts to the Debian/Ubuntu default CGI path
       - ./cgi-bin:/usr/lib/cgi-bin/
       # 2. Map your live development library code
-      - ../../lib:/usr/local/share/perl/lib/FileServerSdk:ro
+      - ../../lib:/usr/local/share/perl/lib:ro
