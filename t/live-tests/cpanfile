@@ -1,0 +1,8 @@
+# cpanfile
+requires 'Net::Amazon::S3';
+requires 'Moose';
+requires 'JSON';
+requires 'HTTP::Tiny';
+requires 'CGI';
+requires 'Digest::SHA';
+requires 'MooseX::Types::DateTime';

@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  web:
+    build: .
+    ports:
+      - "8080:80"
+    env_file:
+      - .env
+    volumes:
+      # 1. Map your test scripts to the Debian/Ubuntu default CGI path
+      - ./cgi-bin:/usr/lib/cgi-bin/
+      # 2. Map your live development library code
+      - ../lib:/usr/local/share/perl/lib:ro

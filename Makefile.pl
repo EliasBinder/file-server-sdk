@@ -23,6 +23,7 @@ WriteMakefile(
         'JSON'            => '2.90',
         'HTTP::Tiny'      => '0.070',
         'CGI'             => '4.38',
+        'Digest::SHA'     => '6.04',
     },
 
     # Recommended for modern Perl

@@ -11,6 +11,9 @@
 *.pm.tdy
 *.bs
 
+# Docker
+.env
+
 # Devel::Cover
 cover_db/
 
