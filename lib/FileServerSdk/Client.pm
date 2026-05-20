@@ -11,42 +11,69 @@ use MIME::Base64 qw(encode_base64);
 use Digest::SHA  qw(hmac_sha256);
 use POSIX        qw(strftime);
 
-# Configuration
-my %CONFIG = (
-    s3_host => $ENV{S3_HOST}
-      || 's3.primuss.de',
-    pipeline_endpoint => $ENV{PIPELINE_ENDPOINT}
-      || 'https://pipeline-mgm.primuss.de/pipeline',
-    default_expires => 3_600,    # 1 hour
+# Default configuration
+my %DEFAULT_CONFIG = (
+    s3_host           => 's3.primuss.de',
+    pipeline_endpoint => 'https://pipeline-mgm.primuss.de/pipeline',
+    metadata_endpoint => 'https://pipeline-mgm.primuss.de/metadata',
+    default_expires   => 3_600,                                        # 1 hour
 );
 
 sub new {
     my ( $class, %args ) = @_;
 
-    # Validate required environment variables
-    die "ACCESS_KEY_ID environment variable is required\n"
-      unless $ENV{ACCESS_KEY_ID};
-    die "SECRET_ACCESS_KEY environment variable is required\n"
-      unless $ENV{SECRET_ACCESS_KEY};
-    die "PIPELINE_SHARED_SECRET environment variable is required\n"
-      unless $ENV{PIPELINE_SHARED_SECRET};
+    # Initialize config with defaults
+    my %config = %DEFAULT_CONFIG;
+
+    # Override with provided arguments or environment variables
+    $config{access_key_id} = $args{access_key_id} || $ENV{ACCESS_KEY_ID};
+    $config{secret_access_key} =
+      $args{secret_access_key} || $ENV{SECRET_ACCESS_KEY};
+    $config{pipeline_shared_secret} =
+      $args{pipeline_shared_secret} || $ENV{PIPELINE_SHARED_SECRET};
+    $config{s3_host} =
+      $args{s3_host} || $ENV{S3_HOST} || $DEFAULT_CONFIG{s3_host};
+    $config{pipeline_endpoint} =
+         $args{pipeline_endpoint}
+      || $ENV{PIPELINE_ENDPOINT}
+      || $DEFAULT_CONFIG{pipeline_endpoint};
+    $config{metadata_endpoint} =
+         $args{metadata_endpoint}
+      || $ENV{METADATA_ENDPOINT}
+      || $DEFAULT_CONFIG{metadata_endpoint};
+
+    # Validate required variables
+    die
+"ACCESS_KEY_ID is required (provide via argument or environment variable)\n"
+      unless $config{access_key_id};
+    die
+"SECRET_ACCESS_KEY is required (provide via argument or environment variable)\n"
+      unless $config{secret_access_key};
+    die
+"PIPELINE_SHARED_SECRET is required (provide via argument or environment variable)\n"
+      unless $config{pipeline_shared_secret};
 
     # Manually create and initialize the hash reference
     my $self = {};
 
-    # Copy arguments into the hash
+    # Store config in the object
+    $self->{config} = \%config;
+
+    # Copy other arguments into the hash
     foreach my $key ( keys %args ) {
-        $self->{$key} = $args{$key};
+        $self->{$key} = $args{$key}
+          unless $key =~
+/^(access_key_id|secret_access_key|pipeline_shared_secret|s3_host|pipeline_endpoint|metadata_endpoint)$/;
     }
 
     # Initialize the S3 client
     my $s3 = Net::Amazon::S3->new(
         authorization_context => Net::Amazon::S3::Authorization::Basic->new(
-            aws_access_key_id     => $ENV{ACCESS_KEY_ID},
-            aws_secret_access_key => $ENV{SECRET_ACCESS_KEY},
+            aws_access_key_id     => $config{access_key_id},
+            aws_secret_access_key => $config{secret_access_key},
         ),
         vendor => Net::Amazon::S3::Vendor::Generic->new(
-            host                 => $CONFIG{s3_host},
+            host                 => $config{s3_host},
             use_virtual_host     => 0,
             use_https            => 1,
             default_region       => 'us-east-1',
@@ -87,7 +114,7 @@ sub download_file {
     my $file       = $bucket_obj->get_key($key);
 
     if ( defined $file ) {
-        return $file->content;
+        return $file->{value};
     }
     else {
         die "File not found in bucket '$bucket' with key '$key'\n";
@@ -131,6 +158,66 @@ sub delete_file {
     }
 }
 
+sub get_metadata {
+    my ( $self, $bucket, $key ) = @_;
+
+    die "bucket is required\n" unless defined $bucket;
+    die "key is required\n"    unless defined $key;
+
+    # Make a HTTP request to the metadata endpoint
+    my $response = HTTP::Tiny->new->request(
+        'GET',
+        $self->{config}->{metadata_endpoint}
+          . "?bucket=$bucket&key=$key&secret=$self->{config}->{pipeline_shared_secret}",
+    );
+
+    if ( $response->{success} ) {
+        my $metadata = eval { $self->{json}->decode( $response->{content} ) };
+        if ($@) {
+            die "Failed to decode metadata JSON: $@\n";
+        }
+        return $metadata;
+    }
+    else {
+        die "Failed to get metadata: "
+          . $response->{status} . " "
+          . $response->{reason} . "\n";
+    }
+}
+
+sub set_metadata {
+    my ( $self, $bucket, $key, $metadata ) = @_;
+
+    die "bucket is required\n"   unless defined $bucket;
+    die "key is required\n"      unless defined $key;
+    die "metadata is required\n" unless defined $metadata;
+
+    my $metadata_json = eval { $self->{json}->encode($metadata) };
+    if ($@) {
+        die "Failed to encode metadata to JSON: $@\n";
+    }
+
+    # Make a HTTP request to the metadata endpoint
+    my $response = HTTP::Tiny->new->request(
+        'PATCH',
+        $self->{config}->{metadata_endpoint}
+          . "?bucket=$bucket&key=$key&secret=$self->{config}->{pipeline_shared_secret}",
+        {
+            headers => { 'Content-Type' => 'application/json' },
+            content => $metadata_json,
+        }
+    );
+
+    if ( $response->{success} ) {
+        return 1;
+    }
+    else {
+        die "Failed to set metadata: "
+          . $response->{status} . " "
+          . $response->{reason} . "\n";
+    }
+}
+
 sub execute_pipeline {
     my ( $self, $pipeline, $webhook_url, $on_success, $on_error ) = @_;
 
@@ -151,7 +238,7 @@ sub execute_pipeline {
     my $pipeline_json = $pipeline->to_json();
 
     # Build request body
-    my %req_body = ( pipeline => $pipeline_json, );
+    my %req_body = ( steps => $pipeline_json, );
 
     # Add webhook info if provided
     if ( defined $webhook_url ) {
@@ -169,7 +256,9 @@ sub execute_pipeline {
     # Send the request to the file server
     my $response = HTTP::Tiny->new->request(
         'PUT',
-        $CONFIG{pipeline_endpoint} . '?secret=' . $ENV{PIPELINE_SHARED_SECRET},
+        $self->{config}->{pipeline_endpoint}
+          . '?secret='
+          . $self->{config}->{pipeline_shared_secret},
         {
             headers => { 'Content-Type' => 'application/json' },
             content => $json_body,
@@ -204,7 +293,8 @@ sub execute_pipeline {
     else {
         die "Failed to execute pipeline: "
           . $response->{status} . " "
-          . $response->{reason} . "\n";
+          . $response->{reason} . " "
+          . $json_body . "\n";
     }
 }
 
@@ -231,7 +321,7 @@ sub handle_webhook {
 
     # Get "secret" CGI Parameter
     my $secret          = CGI::param('secret');
-    my $expected_secret = $ENV{PIPELINE_SHARED_SECRET};
+    my $expected_secret = $self->{config}->{pipeline_shared_secret};
 
     # Verify the secret
     unless ( defined $secret && $secret eq $expected_secret ) {
@@ -318,10 +408,11 @@ sub handle_generate_presigned_urls {
     my $date_iso = strftime( '%Y%m%dT%H%M%SZ', gmtime($now) );
     my $expiration =
       strftime( '%Y-%m-%dT%H:%M:%SZ', gmtime( $now + $expires_in ) );
-    my $region     = 'us-east-1';
-    my $credential = "$ENV{ACCESS_KEY_ID}/$date_ymd/$region/s3/aws4_request";
-    my $signing_key =
-      _derive_signing_key( $ENV{SECRET_ACCESS_KEY}, $date_ymd, $region, 's3' );
+    my $region = 'us-east-1';
+    my $credential =
+      "$self->{config}->{access_key_id}/$date_ymd/$region/s3/aws4_request";
+    my $signing_key = _derive_signing_key( $self->{config}->{secret_access_key},
+        $date_ymd, $region, 's3' );
 
     my @presigned_urls;
 
@@ -379,7 +470,7 @@ sub handle_generate_presigned_urls {
           {
             index  => $file->{index},
             uuid   => $uuid,
-            url    => "https://$CONFIG{s3_host}/$bucket",
+            url    => "https://" . $self->{config}->{s3_host} . "/$bucket",
             fields => {
                 key                => $uuid,
                 acl                => 'private',
