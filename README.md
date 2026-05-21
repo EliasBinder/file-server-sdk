@@ -125,8 +125,8 @@ my $pipeline = FileServerSdk::SequentialPipeline->new()
     ->add_task_step($task);
 
 # Execute the pipeline (without webhook)
-my $pipeline_id = $client->execute_pipeline($pipeline);
-print "Pipeline ID: $pipeline_id\n";
+my $result = $client->execute_pipeline($pipeline);
+print "Pipeline ID: $result\n";
 ```
 
 ### 6. Execute a Pipeline with Webhook Callbacks
@@ -146,25 +146,36 @@ my $task = FileServerSdk::Tasks::PdfMergerTask->new(
 my $pipeline = FileServerSdk::SequentialPipeline->new()
     ->add_task_step($task);
 
+# Generate a unique pipeline ID first
+my $pipeline_id = $client->gen_uuid();
+
+# Optionally: Create a placeholder entry in database before executing
+# store_pipeline_record($pipeline_id, 'pending');
+
 # Execute with webhook callbacks
-my $pipeline_id = $client->execute_pipeline(
+my $result = $client->execute_pipeline(
+    $pipeline_id,
     $pipeline,
-    'https://your-server.com/some-path?action=webhook',
-    sub {
-        # Success callback
-        print "Pipeline completed successfully!\n";
-    },
-    sub {
-        my ($error) = @_;
-        # Error callback
-        print "Pipeline failed: $error\n";
-    }
+    'https://your-server.com/some-path?action=webhook'
 );
+
+print "Pipeline ID: $result\n";
 
 # Handle incoming webhook on your server
 my $action = CGI::param('action');
 if ($action eq 'webhook') {
-  $client->handle_webhook();
+  $client->handle_webhook(
+    sub {
+      my ($pipeline_id) = @_;
+      # Success callback - update database
+      update_pipeline_record($pipeline_id, 'completed');
+    },
+    sub {
+      my ($pipeline_id, $error) = @_;
+      # Error callback - update database with error
+      update_pipeline_record($pipeline_id, 'failed', $error);
+    }
+  );
 }
 ```
 
@@ -299,30 +310,55 @@ Sets metadata for a file.
 $client->set_metadata('my_bucket', 'path/to/file.pdf', { key => 'value' });
 ```
 
-#### `execute_pipeline($pipeline, [$webhook_url, $on_success, $on_error])`
+#### `execute_pipeline($pipeline, [$pipeline_id, $webhook_url])`
 
-Executes a pipeline. Optionally accepts webhook URL and callbacks.
+Executes a pipeline. Optionally accepts a pipeline ID and webhook URL.
+
+**Parameters:**
+- `$pipeline` (object, required): SequentialPipeline or ParallelPipeline instance
+- `$pipeline_id` (string, optional): Unique pipeline ID (generated if not provided)
+- `$webhook_url` (string, optional): URL for webhook callbacks
+
+**Returns:** Pipeline ID (string)
 
 ```perl
-# Without webhooks
+# Without webhooks (auto-generated ID)
 my $pipeline_id = $client->execute_pipeline($pipeline);
 
-# With webhooks
-my $pipeline_id = $client->execute_pipeline(
+# With pre-generated ID and webhooks
+my $pipeline_id = $client->gen_uuid();
+my $result = $client->execute_pipeline(
+    $pipeline_id,
     $pipeline,
-    'https://your-server.com/webhook',
-    sub { print "Success!\n"; },
-    sub { my ($error) = @_; print "Error: $error\n"; }
+    'https://your-server.com/webhook?action=webhook'
 );
+print "Pipeline ID: $result\n";
 ```
 
-#### `handle_webhook()`
+#### `handle_webhook($on_success, $on_error)`
 
 Processes incoming webhook requests from the pipeline server.
 
+**Parameters:**
+- `$on_success` (code ref, optional): Callback for successful pipeline completion
+- `$on_error` (code ref, optional): Callback for pipeline failure
+
+**Callback Signatures:**
+- Success: `sub { my ($pipeline_id) = @_; }` (receives pipeline ID)
+- Error: `sub { my ($pipeline_id, $error) = @_; }` (receives pipeline ID and error message)
+
 ```perl
 if ($action eq 'webhook') {
-    $client->handle_webhook();
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            print "Pipeline $pipeline_id completed!\n";
+        },
+        sub {
+            my ($pipeline_id, $error) = @_;
+            print "Pipeline $pipeline_id failed: $error\n";
+        }
+    );
 }
 ```
 
@@ -414,7 +450,8 @@ my $task = FileServerSdk::Tasks::PdfMergerTask->new(
 - **Pipeline Management**: Build and execute complex file processing workflows
 - **Sequential Execution**: Run tasks one after another
 - **Parallel Execution**: Run independent workflows concurrently
-- **Webhook Support**: Get notified when pipelines complete or fail
+- **Pipeline ID Control**: Pre-generate pipeline IDs for database tracking and webhooks
+- **Webhook Support**: Get notified when pipelines complete or fail with pipeline IDs in callbacks
 - **Presigned URLs**: Generate secure URLs for browser-based uploads
 - **File Management**: Upload, download, and delete files
 - **Metadata**: Get and set file metadata

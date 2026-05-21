@@ -4,7 +4,124 @@ Practical examples and solutions to common issues.
 
 ## Real-World Examples
 
-### Example 1: Document Merge Application
+### Example 1: Pipeline with Webhook and Database Tracking
+
+This example demonstrates the recommended pattern: pre-generating a pipeline ID, storing it in the database before execution, and updating the database when the webhook fires.
+
+```perl
+#!/usr/bin/perl
+use strict;
+use warnings;
+use utf8;
+use CGI qw(:standard);
+use FileServerSdk::Client;
+use FileServerSdk::SequentialPipeline;
+use FileServerSdk::Tasks::PdfMergerTask;
+use DBI;
+
+binmode(STDOUT, ":utf8");
+
+print "Content-type: text/plain; charset=UTF-8\n\n";
+
+my $client = FileServerSdk::Client->new();
+my $dbh = DBI->connect('dbi:mysql:app', 'user', 'pass');
+my $action = param('action') || 'execute';
+
+if ($action eq 'send') {
+    # Step 1: Generate unique ID
+    my $pipeline_id = $client->gen_uuid();
+    print "Generated pipeline ID: $pipeline_id\n";
+    
+    # Step 2: Pre-allocate resources in database
+    eval {
+        my $sth = $dbh->prepare(q{
+            INSERT INTO pipeline_jobs (job_id, status, created_at)
+            VALUES (?, 'pending', NOW())
+        });
+        $sth->execute($pipeline_id);
+        print "Created database record for pipeline\n";
+    };
+    
+    if ($@) {
+        die "Failed to create pipeline record: $@\n";
+    }
+    
+    # Step 3: Create and execute pipeline
+    my $pipeline = FileServerSdk::SequentialPipeline->new();
+    my $merge_pdf_task = FileServerSdk::Tasks::PdfMergerTask->new(
+        input_files => ["test/sample1.pdf", "test/sample2.pdf"],
+        output_file => "test/merged_with_perl.pdf"
+    );
+    $pipeline->add_task_step($merge_pdf_task);
+    
+    print "Pipeline created successfully\n";
+    
+    # Step 4: Execute with webhook callback
+    my $result = $client->execute_pipeline(
+        $pipeline_id,  # Use the pre-generated ID
+        $pipeline,
+        'https://your-app.com/cgi-bin/pipeline.pl?action=webhook'
+    );
+    
+    print "Pipeline executed with ID: $result\n";
+}
+elif ($action eq 'webhook') {
+    # Step 5: Handle webhook callback
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            warn "Received successful webhook callback for pipeline ID: $pipeline_id\n";
+            
+            # Update database with completion status
+            eval {
+                my $sth = $dbh->prepare(q{
+                    UPDATE pipeline_jobs
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE job_id = ?
+                });
+                $sth->execute($pipeline_id);
+            };
+            
+            if ($@) {
+                warn "Error updating database: $@\n";
+            }
+        },
+        sub {
+            my ($pipeline_id, $error_message) = @_;
+            warn "Received error webhook callback for pipeline ID: $pipeline_id\n";
+            warn "Error: $error_message\n";
+            
+            # Update database with error status
+            eval {
+                my $sth = $dbh->prepare(q{
+                    UPDATE pipeline_jobs
+                    SET status = 'failed', error_msg = ?, failed_at = NOW()
+                    WHERE job_id = ?
+                });
+                $sth->execute($error_message, $pipeline_id);
+            };
+            
+            if ($@) {
+                warn "Error updating database: $@\n";
+            }
+        }
+    );
+}
+else {
+    print "Unknown action: $action\n";
+}
+
+1;
+```
+
+**Key Points:**
+1. **ID Generation**: `gen_uuid()` creates a unique ID before execution
+2. **Pre-allocation**: Database record is created immediately with 'pending' status
+3. **Execution**: Pipeline is executed with the pre-generated ID
+4. **Tracking**: Webhook callback receives the same ID and updates the database
+5. **Audit Trail**: Complete history from submission to completion
+
+### Example 2: Document Merge Application
 
 A web application where users upload multiple PDFs and get a merged document back.
 
@@ -48,33 +165,30 @@ elsif ($action eq 'merge') {
     my @files = split(',', param('files'));
     
     eval {
+        # Generate unique ID first
+        my $pipeline_id = $client->gen_uuid();
+        
+        # Store in database with pending status
+        update_job_status($pipeline_id, 'pending');
+        
         my $task = FileServerSdk::Tasks::PdfMergerTask->new(
             input_files => \@files,
-            output_file => 'document-processor/merged/' . time() . '.pdf'
+            output_file => 'document-processor/merged/' . $pipeline_id . '.pdf'
         );
         
         my $pipeline = FileServerSdk::SequentialPipeline->new()
             ->add_task_step($task);
         
-        my $pipeline_id = $client->execute_pipeline(
+        # Execute with the pre-generated ID
+        my $result = $client->execute_pipeline(
+            $pipeline_id,
             $pipeline,
-            'https://myapp.com/api/merge?action=webhook',
-            sub {
-                # Success
-                update_job_status($pipeline_id, 'completed');
-                notify_user($pipeline_id, 'Your documents have been merged!');
-            },
-            sub {
-                my ($error) = @_;
-                # Error
-                update_job_status($pipeline_id, 'failed', $error);
-                notify_user($pipeline_id, "Merge failed: $error");
-            }
+            'https://myapp.com/api/merge?action=webhook'
         );
         
         print header('application/json');
         print $json->encode({
-            pipeline_id => $pipeline_id,
+            pipeline_id => $result,
             status => 'processing'
         });
     };
@@ -84,9 +198,20 @@ elsif ($action eq 'merge') {
         print $json->encode({ error => $@ });
     }
 }
-elsif ($action eq 'webhook') {
+elif ($action eq 'webhook') {
     # Handle webhook callback
-    $client->handle_webhook();
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            update_job_status($pipeline_id, 'completed');
+            notify_user($pipeline_id, 'Your documents have been merged!');
+        },
+        sub {
+            my ($pipeline_id, $error) = @_;
+            update_job_status($pipeline_id, 'failed', $error);
+            notify_user($pipeline_id, "Merge failed: $error");
+        }
+    );
 }
 
 sub update_job_status {

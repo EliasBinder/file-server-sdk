@@ -34,30 +34,25 @@ if ( $action eq 'send' ) {
     use Data::Dumper;
     print Dumper($json);
 
-    my $result = $client->execute_pipeline(
-        $pipeline,
-"https://plunder-gopher-concert.ngrok-free.dev/cgi-bin/pipeline_with_webhook.pl?action=webhook",
-        sub {
-            my ($response) = @_;
-            print "Pipeline executed successfully\n";
-
-            # Write something to STDERR to confirm that the webhook was called
-            warn "Webhook callback received response: " . Dumper($response);
-
-            print Dumper($response);
-        },
-        sub {
-            my ($error) = @_;
-            print "Pipeline execution failed\n";
-            warn "Webhook callback received error: " . Dumper($error);
-            print Dumper($error);
-        }
+    my $pipeline_id = $client->gen_uuid();
+    my $result      = $client->execute_pipeline( $pipeline_id, $pipeline,
+"https://plunder-gopher-concert.ngrok-free.dev/cgi-bin/pipeline_with_webhook.pl?action=webhook"
     );
 
     print "Pipeline fired!\n";
 }
 elsif ( $action eq 'webhook' ) {
-    $client->handle_webhook();
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            warn
+"Received successful webhook callback for pipeline ID: $pipeline_id\n";
+        },
+        sub {
+            my ( $pipeline_id, $error_message ) = @_;
+            warn "Received error webhook callback: $error_message\n";
+        }
+    );
 }
 else {
     print "Unknown action: $action\n";

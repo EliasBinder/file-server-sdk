@@ -87,9 +87,6 @@ sub new {
     # JSON encoder
     $self->{json} = JSON->new->allow_nonref;
 
-    # Hash for storing callbacks - key is pipelineId, value is callbacks hashref
-    $self->{callbacks} = {};
-
     # Manually bless the reference into the class
     bless $self, $class;
 
@@ -219,20 +216,10 @@ sub set_metadata {
 }
 
 sub execute_pipeline {
-    my ( $self, $pipeline, $webhook_url, $on_success, $on_error ) = @_;
+    my ( $self, $pipeline_id, $pipeline, $webhook_url ) = @_;
 
     # Validate required inputs
     die "pipeline is required\n" unless defined $pipeline;
-
-    # Validate webhook and callbacks are both provided or both omitted
-    if ( defined $webhook_url || defined $on_success || defined $on_error ) {
-        die "webhook_url is required if callbacks are provided\n"
-          unless defined $webhook_url;
-        die "on_success callback is required if webhook_url is provided\n"
-          unless defined $on_success && ref($on_success) eq 'CODE';
-        die "on_error callback is required if webhook_url is provided\n"
-          unless defined $on_error && ref($on_error) eq 'CODE';
-    }
 
     # Convert the pipeline to JSON
     my $pipeline_json = $pipeline->to_json();
@@ -248,6 +235,10 @@ sub execute_pipeline {
     # Build request body
     # Add "webhook" field only if webhook_url is provided, otherwise omit it
     my %req_body = ( steps => $pipeline_json, );
+
+    if ( defined $pipeline_id ) {
+        $req_body{id} = $pipeline_id;
+    }
 
     # Add webhook info if provided
     if ( defined $webhook_url ) {
@@ -279,17 +270,8 @@ sub execute_pipeline {
             die "Failed to decode response JSON: $@\n";
         }
         if ( exists $response_data->{pipelineId} ) {
-            my $pipelineId = $response_data->{pipelineId};
-
-            # Store the callbacks if webhook was provided
-            if ( defined $webhook_url ) {
-                $self->{callbacks}->{$pipelineId} = {
-                    on_success => $on_success,
-                    on_error   => $on_error,
-                };
-            }
-
-            return $pipelineId;
+            my $pipeline_id = $response_data->{pipelineId};
+            return $pipeline_id;
         }
         else {
             die "Response does not contain pipelineId: "
@@ -323,7 +305,7 @@ sub cleanup_pipeline {
 }
 
 sub handle_webhook {
-    my ($self) = @_;
+    my ( $self, $on_success, $on_failed ) = @_;
 
     # Get "secret" CGI Parameter
     my $secret          = CGI::param('secret');
@@ -344,35 +326,20 @@ sub handle_webhook {
         return 0;
     }
 
-    # Retrieve the callbacks for the given pipelineId
-    my $callbacks = $self->{callbacks}->{$pipelineId};
-
-    unless ( defined $callbacks ) {
-        warn "No callbacks found for pipelineId: $pipelineId\n";
-        return 0;
-    }
-
     # Execute appropriate callback based on status
     if ( $status eq 'completed' ) {
-        if ( defined $callbacks->{on_success} ) {
-            $callbacks->{on_success}->();
-            print "Content-Type: application/json\n\n";
-            print "{\"success\": true}\n";
-            return 1;
-        }
+        $on_success->($pipelineId) if defined $on_success;
+        print "Content-Type: application/json\n\n";
+        print "{\"success\": true}\n";
+        return 1;
     }
     else {
         my $error = CGI::param('error') || 'Unknown error';
-        if ( defined $callbacks->{on_error} ) {
-            $callbacks->{on_error}->($error);
-            print "Content-Type: application/json\n\n";
-            print "{\"success\": true}\n";
-            return 1;
-        }
+        $on_failed->( $pipelineId, $error );
+        print "Content-Type: application/json\n\n";
+        print "{\"success\": true}\n";
+        return 1;
     }
-
-    warn
-"No appropriate callback found for pipelineId: $pipelineId with status: $status\n";
     return 0;
 }
 

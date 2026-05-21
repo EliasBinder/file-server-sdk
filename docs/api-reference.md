@@ -33,7 +33,7 @@ my $client = FileServerSdk::Client->new();
 
 ### File Operations
 
-#### `upload_file($bucket, $key, $content)`
+#### `upload_file($bucket, $key, $content, $content_type)`
 
 Uploads content to S3.
 
@@ -41,6 +41,7 @@ Uploads content to S3.
 - `$bucket` (string, required): S3 bucket name
 - `$key` (string, required): S3 object key (path)
 - `$content` (string, required): File content to upload
+- `$content_type` (string, required): MIME type (e.g., 'application/pdf')
 
 **Returns:** 1 on success
 
@@ -48,7 +49,7 @@ Uploads content to S3.
 
 **Example:**
 ```perl
-$client->upload_file('my-bucket', 'documents/file.pdf', $content);
+$client->upload_file('my-bucket', 'documents/file.pdf', $content, 'application/pdf');
 ```
 
 #### `download_file($bucket, $key)`
@@ -128,57 +129,76 @@ $client->set_metadata('my-bucket', 'documents/file.pdf', {
 
 ### Pipeline Operations
 
-#### `execute_pipeline($pipeline, [$webhook_url, $on_success, $on_error])`
+#### `execute_pipeline($pipeline, [$pipeline_id, $webhook_url])`
 
-Executes a pipeline.
+Executes a pipeline. For webhook scenarios, you should pre-generate and pass a pipeline ID.
 
 **Parameters:**
 - `$pipeline` (object, required): SequentialPipeline or ParallelPipeline instance
+- `$pipeline_id` (string, optional): Unique pipeline ID. If omitted, one is generated automatically.
 - `$webhook_url` (string, optional): URL for webhook callbacks
-- `$on_success` (code ref, optional): Success callback (required if webhook_url provided)
-- `$on_error` (code ref, optional): Error callback (required if webhook_url provided)
 
 **Returns:** Pipeline ID (string)
 
 **Throws:** Dies on error
 
-**Callback Signatures:**
-- Success: `sub { }` (no parameters)
-- Error: `sub { my ($error) = @_; }` (error message parameter)
+**Usage Patterns:**
 
-**Example:**
 ```perl
-my $pipeline_id = $client->execute_pipeline(
+# Pattern 1: Simple execution without webhooks (auto-generated ID)
+my $pipeline_id = $client->execute_pipeline($pipeline);
+
+# Pattern 2: With pre-generated ID (for database tracking)
+my $pipeline_id = $client->gen_uuid();
+my $result = $client->execute_pipeline(
+    $pipeline_id,
     $pipeline,
-    'https://your-app.com/webhook?action=webhook',
-    sub { print "Success!\n"; },
-    sub { my ($e) = @_; print "Error: $e\n"; }
+    'https://your-server.com/webhook?action=webhook'
+);
+
+# Pattern 3: Pre-allocate resources before execution
+my $pipeline_id = $client->gen_uuid();
+store_in_database($pipeline_id, 'pending');  # Reserve resources
+my $result = $client->execute_pipeline(
+    $pipeline_id,
+    $pipeline,
+    'https://your-server.com/webhook?action=webhook'
 );
 ```
 
-#### `handle_webhook()`
+#### `handle_webhook($on_success, $on_error)`
 
-Handles incoming webhook callbacks. Should be called from your webhook handler.
+Processes incoming webhook requests from the pipeline server.
 
-**Parameters:** None (uses CGI parameters)
+**Parameters:**
+- `$on_success` (code ref, optional): Callback for successful pipeline completion
+- `$on_error` (code ref, optional): Callback for pipeline failure
 
-**Returns:** 1 on success, 0 on failure
+**Callback Signatures:**
+- Success: `sub { my ($pipeline_id) = @_; }` - Receives pipeline ID
+- Error: `sub { my ($pipeline_id, $error) = @_; }` - Receives pipeline ID and error message
 
-**CGI Parameters Expected:**
-- `secret`: Shared secret (validated automatically)
-- `pipelineId`: Pipeline ID
-- `status`: Pipeline status (e.g., 'completed')
-- `error`: Error message (if status indicates failure)
+**CGI Parameters Expected (automatically validated):**
+- `secret`: Shared secret (validated against `PIPELINE_SHARED_SECRET`)
+- `pipelineId`: Pipeline ID from server
+- `status`: Pipeline status ('completed', 'failed', etc.)
+- `error`: Error message (only if status indicates failure)
+
+**Returns:** 1 on success, 0 on validation failure
 
 **Example:**
 ```perl
 if ($action eq 'webhook') {
-    my $result = $client->handle_webhook();
-    if ($result) {
-        print "Webhook processed successfully\n";
-    } else {
-        print "Webhook processing failed\n";
-    }
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            update_database($pipeline_id, 'completed');
+        },
+        sub {
+            my ($pipeline_id, $error) = @_;
+            update_database($pipeline_id, 'failed', $error);
+        }
+    );
 }
 ```
 
@@ -189,13 +209,27 @@ Deletes all files associated with a pipeline.
 **Parameters:**
 - `$pipeline` (object, required): SequentialPipeline or ParallelPipeline instance
 
-**Returns:** None
+**Returns:** 1 on success
 
 **Throws:** Warnings on individual file deletion failures
 
 **Example:**
 ```perl
 $client->cleanup_pipeline($pipeline);
+```
+
+#### `gen_uuid()`
+
+Generates a new unique UUID suitable for use as a pipeline ID.
+
+**Parameters:** None
+
+**Returns:** String containing a UUID (format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx)
+
+**Example:**
+```perl
+my $pipeline_id = $client->gen_uuid();
+print "Generated ID: $pipeline_id\n";
 ```
 
 ### S3 Client Access
@@ -552,7 +586,7 @@ All methods throw exceptions (die) on error. Handle using eval:
 
 ```perl
 eval {
-    $client->upload_file($bucket, $key, $content);
+    $client->upload_file($bucket, $key, $content, 'application/pdf');
 };
 
 if ($@) {
@@ -570,8 +604,41 @@ if ($@) {
 | `Failed to upload file` | S3 operation failed | Check credentials and bucket |
 | `Failed to download file` | File not found or access denied | Check file path and permissions |
 | `pipeline is required` | Missing pipeline parameter | Pass pipeline object |
-| `webhook_url is required if callbacks are provided` | Incomplete webhook setup | Provide all 3 webhook parameters |
 | `Number of files exceeds the maximum limit` | Too many files in presigned URL request | Reduce file count or increase `max_files` |
 | `Content type is not allowed` | File type not in whitelist | Specify allowed `content_types` |
 | `File size exceeds the limit` | File too large | Increase size limit or reject file |
 
+## Pipeline ID Management
+
+The SDK supports explicit pipeline ID management for better tracking and resource allocation:
+
+### Why Use Pre-Generated IDs?
+
+1. **Database Tracking**: Store pipeline IDs before execution begins
+2. **Resource Allocation**: Pre-allocate storage or processing resources
+3. **User Session Linking**: Associate pipelines with user sessions
+4. **Audit Trail**: Create a complete history from submission to completion
+
+### Best Practice Pattern
+
+```perl
+# Step 1: Generate ID
+my $pipeline_id = $client->gen_uuid();
+
+# Step 2: Create database record (pre-allocate resources)
+my $sth = $dbh->prepare(q{
+    INSERT INTO pipeline_jobs (job_id, user_id, status, created_at)
+    VALUES (?, ?, 'pending', NOW())
+});
+$sth->execute($pipeline_id, $user_id);
+
+# Step 3: Execute pipeline with known ID
+my $result = $client->execute_pipeline(
+    $pipeline_id,
+    $pipeline,
+    'https://your-server.com/webhook?action=webhook'
+);
+
+# Step 4: Webhook callback updates the same record
+# The pipeline_id in the callback matches the ID you created
+```

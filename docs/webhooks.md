@@ -1,20 +1,27 @@
 # Webhooks and Callbacks Guide
 
-Webhooks allow your application to receive real-time notifications when pipelines complete or fail. This guide explains how to implement and handle webhooks.
+Webhooks allow your application to receive real-time notifications when pipelines complete or fail. This guide explains how to implement and handle webhooks with pipeline ID tracking.
 
-## How Webhooks Work
+## Overview of the Webhook Flow
 
-When you execute a pipeline with a webhook URL and callbacks:
+The webhook system now supports explicit pipeline ID management:
 
-1. Your application registers callbacks with the client
-2. The client sends the pipeline to the server with the webhook URL
-3. The pipeline server executes the pipeline asynchronously
-4. Upon completion (success or failure), the server makes an HTTP POST request to your webhook URL
-5. Your application's webhook handler processes the callback and executes the appropriate callback function
+1. Your application generates a unique pipeline ID using `gen_uuid()`
+2. Optionally: Store a placeholder entry in your database with the pipeline ID
+3. The client sends the pipeline to the server with the pipeline ID and webhook URL
+4. The pipeline server executes the pipeline asynchronously
+5. Upon completion (success or failure), the server makes an HTTP POST request to your webhook URL
+6. Your application's webhook handler receives the pipeline ID in the callback
+
+This workflow allows you to:
+- Track pipeline execution in your database
+- Link pipelines to user sessions or business entities
+- Pre-allocate storage or resources before execution
+- Update records with results when the webhook fires
 
 ## Setting Up Webhooks
 
-### Basic Webhook Execution
+### Basic Webhook Execution with ID Management
 
 ```perl
 use FileServerSdk::Client;
@@ -31,25 +38,37 @@ my $task = FileServerSdk::Tasks::PdfMergerTask->new(
 my $pipeline = FileServerSdk::SequentialPipeline->new()
     ->add_task_step($task);
 
-# Execute with webhook
-my $pipeline_id = $client->execute_pipeline(
+# Step 1: Generate a unique pipeline ID
+my $pipeline_id = $client->gen_uuid();
+
+# Step 2: Optionally create a placeholder in your database
+eval {
+    store_pipeline_record({
+        pipeline_id => $pipeline_id,
+        status => 'pending',
+        created_at => time(),
+    });
+};
+
+if ($@) {
+    warn "Failed to create pipeline record: $@\n";
+}
+
+# Step 3: Execute with webhook (ID is now known to your application)
+my $result = $client->execute_pipeline(
+    $pipeline_id,
     $pipeline,
-    'https://your-app.com/api/webhook?action=webhook',
-    sub {
-        # Success callback
-        print "Pipeline $pipeline_id completed successfully!\n";
-    },
-    sub {
-        # Error callback
-        my ($error) = @_;
-        print "Pipeline $pipeline_id failed: $error\n";
-    }
+    'https://your-app.com/api/webhook?action=webhook'
 );
 
-print "Pipeline ID: $pipeline_id\n";
-```
+print "Pipeline ID: $result\n";
 
-## Webhook Handlers
+sub store_pipeline_record {
+    my ($record) = @_;
+    # Store in your database
+    # e.g., INSERT INTO pipelines (pipeline_id, status, created_at) VALUES (...)
+}
+```
 
 ### Simple CGI Webhook Handler
 
@@ -65,37 +84,62 @@ my $client = FileServerSdk::Client->new();
 
 if ($action eq 'webhook') {
     # Handle the webhook callback
-    my $result = $client->handle_webhook();
-    
-    if ($result) {
-        print header('application/json');
-        print '{"status":"success"}';
-    } else {
-        print header(-status => '400 Bad Request', 'application/json');
-        print '{"status":"error"}';
-    }
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            # Success callback
+            print STDERR "Pipeline $pipeline_id completed successfully\n";
+            update_pipeline_record($pipeline_id, 'completed');
+        },
+        sub {
+            my ($pipeline_id, $error) = @_;
+            # Error callback
+            print STDERR "Pipeline $pipeline_id failed: $error\n";
+            update_pipeline_record($pipeline_id, 'failed', $error);
+        }
+    );
 } else {
-    print header(-status => '404 Not Found');
-    print 'Not found';
+    print "Status: 404 Not Found\n\n";
+}
+
+sub update_pipeline_record {
+    my ($pipeline_id, $status, $error) = @_;
+    # Update in your database
+    # e.g., UPDATE pipelines SET status = ?, error = ? WHERE pipeline_id = ?
 }
 ```
 
 ### Web Framework Integration (Mojolicious)
 
 ```perl
-package MyApp::WebhookController;
+package MyApp::Controller::Webhook;
 use Mojo::Base 'Mojolicious::Controller';
 
-sub webhook {
+sub pipeline_webhook {
     my $c = shift;
     my $client = FileServerSdk::Client->new();
     
     if ($c->req->method eq 'POST') {
-        my $result = $client->handle_webhook();
+        my $success = 0;
         
-        if ($result) {
+        $client->handle_webhook(
+            sub {
+                my ($pipeline_id) = @_;
+                $c->app->log->info("Pipeline $pipeline_id completed");
+                update_db($pipeline_id, 'completed');
+                $success = 1;
+            },
+            sub {
+                my ($pipeline_id, $error) = @_;
+                $c->app->log->error("Pipeline $pipeline_id failed: $error");
+                update_db($pipeline_id, 'failed', $error);
+                $success = 1;
+            }
+        );
+        
+        if ($success) {
             return $c->render(
-                json => { status => 'success' },
+                json => { status => 'processed' },
                 status => 200
             );
         } else {
@@ -107,6 +151,11 @@ sub webhook {
     }
     
     $c->render(status => 404);
+}
+
+sub update_db {
+    my ($pipeline_id, $status, $error) = @_;
+    # Update database
 }
 
 1;
@@ -129,94 +178,122 @@ sub webhook_POST {
     my ($self, $c) = @_;
     my $client = FileServerSdk::Client->new();
     
-    my $result = $client->handle_webhook();
+    my $success = 0;
     
-    if ($result) {
-        $c->stash(status => 'success');
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            $c->log->info("Pipeline $pipeline_id completed");
+            update_db($pipeline_id, 'completed');
+            $success = 1;
+        },
+        sub {
+            my ($pipeline_id, $error) = @_;
+            $c->log->error("Pipeline $pipeline_id failed: $error");
+            update_db($pipeline_id, 'failed', $error);
+            $success = 1;
+        }
+    );
+    
+    if ($success) {
+        $c->stash(status => 'processed');
     } else {
         $c->res->status(400);
         $c->stash(status => 'error');
     }
 }
 
+sub update_db {
+    my ($pipeline_id, $status, $error) = @_;
+    # Update database
+}
+
 __PACKAGE__->meta->make_immutable;
 1;
 ```
 
-## Callback Functions
+## Advanced Callback Handling with Database Integration
 
-### Success Callback
+### Example: Pre-allocation Pattern
 
-The success callback is called when a pipeline completes successfully:
-
-```perl
-my $success_callback = sub {
-    my () = @_;  # No parameters passed
-    
-    # Perform actions after successful pipeline execution
-    print "Pipeline execution completed!\n";
-    
-    # Download results
-    my $result = $client->download_file('bucket', 'output.pdf');
-    
-    # Update database
-    update_database_status('completed');
-    
-    # Send notification
-    send_email_notification('Pipeline completed successfully');
-};
-```
-
-### Error Callback
-
-The error callback is called when a pipeline fails:
+This pattern demonstrates how to reserve resources before pipeline execution:
 
 ```perl
-my $error_callback = sub {
-    my ($error) = @_;
-    
-    # Handle the error
-    warn "Pipeline execution failed: $error\n";
-    
-    # Log error
-    log_error($error);
-    
-    # Update database
-    update_database_status('failed', $error);
-    
-    # Send alert
-    send_alert_email("Pipeline failed: $error");
-    
-    # Clean up temporary files
-    eval {
-        $client->cleanup_pipeline($pipeline);
-    };
-};
-```
-
-## Advanced Callback Handling
-
-### Callback with Database Updates
-
-```perl
+use FileServerSdk::Client;
 use DBI;
 
 my $dbh = DBI->connect('dbi:mysql:myapp', 'user', 'pass');
+my $client = FileServerSdk::Client->new();
 
+# Step 1: Generate ID and pre-allocate resources
+my $pipeline_id = $client->gen_uuid();
+my $user_id = CGI::param('user_id');
+my $output_key = "processed/$user_id/$pipeline_id/output.pdf";
+
+eval {
+    # Reserve space in database
+    my $sth = $dbh->prepare(q{
+        INSERT INTO pipeline_jobs 
+        (pipeline_id, user_id, status, output_key, created_at)
+        VALUES (?, ?, 'pending', ?, NOW())
+    });
+    $sth->execute($pipeline_id, $user_id, $output_key);
+};
+
+if ($@) {
+    die "Failed to reserve pipeline: $@\n";
+}
+
+# Step 2: Build and execute pipeline
+my $task = FileServerSdk::Tasks::PdfMergerTask->new(
+    input_files => \@input_files,
+    output_file => $output_key
+);
+
+my $pipeline = FileServerSdk::SequentialPipeline->new()
+    ->add_task_step($task);
+
+my $webhook_url = 'https://your-app.com/api/webhook?action=webhook&secret='.$ENV{PIPELINE_SHARED_SECRET};
+
+# Step 3: Execute with webhook
+my $result = $client->execute_pipeline(
+    $pipeline_id,
+    $pipeline,
+    $webhook_url
+);
+
+print "Pipeline queued with ID: $result\n";
+```
+
+### Example: Database Update on Completion
+
+```perl
+use FileServerSdk::Client;
+use DBI;
+
+my $dbh = DBI->connect('dbi:mysql:myapp', 'user', 'pass');
 my $client = FileServerSdk::Client->new();
 
 my $on_success = sub {
+    my ($pipeline_id) = @_;
+    
     eval {
-        # Update database
-        my $sth = $dbh->prepare('UPDATE jobs SET status = ? WHERE pipeline_id = ?');
-        $sth->execute('completed', $pipeline_id);
+        # Update status
+        my $sth = $dbh->prepare(q{
+            UPDATE pipeline_jobs 
+            SET status = 'completed', completed_at = NOW()
+            WHERE pipeline_id = ?
+        });
+        $sth->execute($pipeline_id);
         
-        # Download results
-        my $result = $client->download_file('bucket', 'output.pdf');
-        
-        # Save results
-        $sth = $dbh->prepare('UPDATE jobs SET result = ? WHERE pipeline_id = ?');
-        $sth->execute($result, $pipeline_id);
+        # Store completion metrics
+        $sth = $dbh->prepare(q{
+            INSERT INTO pipeline_metrics 
+            (pipeline_id, execution_time, status)
+            VALUES (?, ?, 'success')
+        });
+        my $exec_time = time() - (retrieve_created_time($pipeline_id) || 0);
+        $sth->execute($pipeline_id, $exec_time);
     };
     
     if ($@) {
@@ -225,11 +302,24 @@ my $on_success = sub {
 };
 
 my $on_error = sub {
-    my ($error) = @_;
+    my ($pipeline_id, $error) = @_;
     
     eval {
-        my $sth = $dbh->prepare('UPDATE jobs SET status = ?, error_msg = ? WHERE pipeline_id = ?');
-        $sth->execute('failed', $error, $pipeline_id);
+        # Update status and error
+        my $sth = $dbh->prepare(q{
+            UPDATE pipeline_jobs 
+            SET status = 'failed', error_message = ?, failed_at = NOW()
+            WHERE pipeline_id = ?
+        });
+        $sth->execute($error, $pipeline_id);
+        
+        # Log error metrics
+        $sth = $dbh->prepare(q{
+            INSERT INTO pipeline_metrics 
+            (pipeline_id, error_message, status)
+            VALUES (?, ?, 'failed')
+        });
+        $sth->execute($pipeline_id, $error);
     };
     
     if ($@) {
@@ -237,23 +327,34 @@ my $on_error = sub {
     }
 };
 
-$client->execute_pipeline($pipeline, $webhook_url, $on_success, $on_error);
+$client->handle_webhook($on_success, $on_error);
 ```
 
-### Callback with Event Logging
+### Example: Event Logging and Notifications
 
 ```perl
 my $on_success = sub {
+    my ($pipeline_id) = @_;
+    
     eval {
+        # Get pipeline details
+        my $job = get_pipeline_job($pipeline_id);
+        
+        # Log event
         log_event({
             event_type => 'pipeline_success',
             pipeline_id => $pipeline_id,
+            user_id => $job->{user_id},
             timestamp => time(),
-            details => 'Pipeline execution completed',
+            duration => time() - $job->{created_at},
         });
         
-        # Process results
-        process_pipeline_results($pipeline_id);
+        # Send notification
+        notify_user($job->{user_id}, 
+            "Your document processing is complete");
+        
+        # Update database
+        update_pipeline_job($pipeline_id, 'completed');
     };
     
     if ($@) {
@@ -262,18 +363,26 @@ my $on_success = sub {
 };
 
 my $on_error = sub {
-    my ($error) = @_;
+    my ($pipeline_id, $error) = @_;
     
     eval {
+        my $job = get_pipeline_job($pipeline_id);
+        
+        # Log event
         log_event({
             event_type => 'pipeline_error',
             pipeline_id => $pipeline_id,
+            user_id => $job->{user_id},
             timestamp => time(),
             error => $error,
         });
         
-        # Notify administrators
-        notify_admins("Pipeline $pipeline_id failed: $error");
+        # Send notification
+        notify_user($job->{user_id}, 
+            "Document processing failed: $error");
+        
+        # Update database
+        update_pipeline_job($pipeline_id, 'failed', $error);
     };
     
     if ($@) {
@@ -281,7 +390,7 @@ my $on_error = sub {
     }
 };
 
-$client->execute_pipeline($pipeline, $webhook_url, $on_success, $on_error);
+$client->handle_webhook($on_success, $on_error);
 ```
 
 ## Webhook URL Requirements
@@ -291,32 +400,139 @@ $client->execute_pipeline($pipeline, $webhook_url, $on_success, $on_error);
 The webhook URL should:
 - Be publicly accessible from the pipeline server
 - Accept HTTP POST requests
-- Include the `action=webhook` parameter
-- Include the `secret` parameter that matches `PIPELINE_SHARED_SECRET`
+- Include any necessary parameters for routing (e.g., `action=webhook`)
+- Optionally include the shared secret (though it's also passed as a parameter)
 
-**Example URL:**
+**Example URLs:**
 ```
 https://your-app.com/api/webhook?action=webhook
+https://myservice.example.com/pipeline/callback?token=secret
 ```
 
-### Configuration
+### How the Server Calls Your Webhook
 
-```perl
-my $webhook_url = 'https://your-app.com/api/webhook?action=webhook';
+The pipeline server makes a POST request with these parameters:
 
-# The client will POST with these parameters:
-# - secret: $ENV{PIPELINE_SHARED_SECRET}
-# - pipelineId: <pipeline_id>
-# - status: 'completed' or other status
-# - error: <error_message> (if status is not completed)
+```
+POST https://your-app.com/api/webhook?action=webhook
+
+Parameters:
+  - secret: <PIPELINE_SHARED_SECRET>
+  - pipelineId: <pipeline_id>
+  - status: 'completed' | 'failed' | ...
+  - error: <error_message> (only if status indicates failure)
 ```
 
 ### Security
 
-The webhook URL is verified using:
+The webhook is verified using:
 1. **Shared Secret**: The `secret` parameter must match `PIPELINE_SHARED_SECRET`
 2. **HTTPS**: Use HTTPS in production for security
 3. **POST method**: Webhooks are always POST requests
+4. **Idempotency**: Design callbacks to be idempotent (safe to call multiple times)
+
+## Complete Example: Document Processing Application
+
+```perl
+#!/usr/bin/perl
+use strict;
+use warnings;
+use CGI qw/:standard -utf8/;
+use FileServerSdk::Client;
+use FileServerSdk::SequentialPipeline;
+use FileServerSdk::Tasks::PdfMergerTask;
+use DBI;
+
+my $dbh = DBI->connect('dbi:mysql:app', 'user', 'pass');
+my $client = FileServerSdk::Client->new();
+my $action = param('action') || 'process';
+
+if ($action eq 'process') {
+    # User submitted a job
+    my @file_ids = split(',', param('files'));
+    my $user_id = param('user_id');
+    
+    eval {
+        # Generate unique ID
+        my $pipeline_id = $client->gen_uuid();
+        
+        # Create database record
+        my $sth = $dbh->prepare(q{
+            INSERT INTO jobs (job_id, user_id, status, created_at)
+            VALUES (?, ?, 'pending', NOW())
+        });
+        $sth->execute($pipeline_id, $user_id);
+        
+        # Map file IDs to S3 paths
+        my @s3_files = map { "uploads/$user_id/$_" } @file_ids;
+        my $output_file = "processed/$user_id/$pipeline_id.pdf";
+        
+        # Create and execute pipeline
+        my $task = FileServerSdk::Tasks::PdfMergerTask->new(
+            input_files => \@s3_files,
+            output_file => $output_file
+        );
+        
+        my $pipeline = FileServerSdk::SequentialPipeline->new()
+            ->add_task_step($task);
+        
+        my $webhook_url = 'https://myapp.com/cgi-bin/process.pl?action=callback';
+        
+        my $result = $client->execute_pipeline(
+            $pipeline_id,
+            $pipeline,
+            $webhook_url
+        );
+        
+        print "Content-Type: application/json\n\n";
+        print JSON::to_json({
+            job_id => $result,
+            status => 'queued'
+        });
+    };
+    
+    if ($@) {
+        print "Content-Type: application/json\n";
+        print "Status: 500\n\n";
+        print JSON::to_json({ error => $@ });
+    }
+}
+elsif ($action eq 'callback') {
+    # Webhook callback from pipeline server
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            
+            eval {
+                my $sth = $dbh->prepare(q{
+                    UPDATE jobs 
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE job_id = ?
+                });
+                $sth->execute($pipeline_id);
+            };
+            
+            warn "Error updating job: $@" if $@;
+        },
+        sub {
+            my ($pipeline_id, $error) = @_;
+            
+            eval {
+                my $sth = $dbh->prepare(q{
+                    UPDATE jobs 
+                    SET status = 'failed', error_msg = ?, failed_at = NOW()
+                    WHERE job_id = ?
+                });
+                $sth->execute($error, $pipeline_id);
+            };
+            
+            warn "Error updating job: $@" if $@;
+        }
+    );
+}
+
+1;
+```
 
 ## Testing Webhooks
 
@@ -330,6 +546,8 @@ ngrok http 3000
 
 # Use the ngrok URL in your code
 my $webhook_url = 'https://abc123.ngrok.io/api/webhook?action=webhook';
+
+# You can now test locally with real pipeline callbacks
 ```
 
 ### Mock Testing
@@ -346,178 +564,264 @@ use FileServerSdk::Client;
     local $ENV{PIPELINE_SHARED_SECRET} = 'test_secret';
     
     # Mock CGI parameters
+    my %mock_params = (
+        secret => 'test_secret',
+        pipelineId => '123abc',
+        status => 'completed',
+    );
+    
     local *CGI::param = sub {
         my ($key) = @_;
-        my %params = (
-            secret => 'test_secret',
-            pipelineId => '123abc',
-            status => 'completed',
-        );
-        return $params{$key};
+        return $mock_params{$key} if defined $key;
+        return keys %mock_params;
     };
     
-    my $client = FileServerSdk::Client->new();
-    my $result = $client->handle_webhook();
+    my $callback_called = 0;
     
-    ok($result, 'Webhook handled successfully');
+    my $client = FileServerSdk::Client->new();
+    $client->handle_webhook(
+        sub {
+            my ($pipeline_id) = @_;
+            is($pipeline_id, '123abc', 'Correct pipeline ID passed');
+            $callback_called = 1;
+        }
+    );
+    
+    ok($callback_called, 'Success callback was called');
 }
 
 done_testing();
 ```
 
-## Error Handling in Webhooks
+### Error Webhook Testing
 
-### Timeout Handling
+```perl
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Test::More;
+use FileServerSdk::Client;
+
+# Test error webhook
+{
+    local $ENV{PIPELINE_SHARED_SECRET} = 'test_secret';
+    
+    my %mock_params = (
+        secret => 'test_secret',
+        pipelineId => '456def',
+        status => 'failed',
+        error => 'PDF merge failed: Invalid file format',
+    );
+    
+    local *CGI::param = sub {
+        my ($key) = @_;
+        return $mock_params{$key} if defined $key;
+        return keys %mock_params;
+    };
+    
+    my $error_received;
+    
+    my $client = FileServerSdk::Client->new();
+    $client->handle_webhook(
+        undef,  # no success callback
+        sub {
+            my ($pipeline_id, $error) = @_;
+            is($pipeline_id, '456def', 'Correct pipeline ID');
+            like($error, qr/Invalid file format/, 'Correct error message');
+            $error_received = 1;
+        }
+    );
+    
+    ok($error_received, 'Error callback was called');
+}
+
+done_testing();
+```
+
+## Best Practices
+
+### 1. Always Generate IDs Before Execution
+
+```perl
+# Good - ID is known before execution
+my $pipeline_id = $client->gen_uuid();
+store_in_db($pipeline_id);
+$client->execute_pipeline($pipeline_id, $pipeline, $webhook_url);
+
+# Acceptable - ID generated by server (but harder to track)
+my $result = $client->execute_pipeline($pipeline, $webhook_url);
+```
+
+### 2. Use Database to Track State
+
+```perl
+# Good - full audit trail
+my $pipeline_id = $client->gen_uuid();
+store_pipeline({
+    id => $pipeline_id,
+    user_id => $user_id,
+    status => 'pending',
+    files => \@files,
+    created_at => time(),
+});
+
+$client->execute_pipeline($pipeline_id, $pipeline, $webhook_url);
+```
+
+### 3. Keep Callbacks Quick
+
+```perl
+# Good - quick database update
+my $on_success = sub {
+    my ($pipeline_id) = @_;
+    update_status($pipeline_id, 'completed');
+};
+
+# Bad - slow operation
+my $on_success = sub {
+    my ($pipeline_id) = @_;
+    process_large_file();  # Don't do heavy processing here
+};
+
+# Better - use background jobs
+my $on_success = sub {
+    my ($pipeline_id) = @_;
+    queue_background_job('process_results', { pipeline_id => $pipeline_id });
+};
+```
+
+### 4. Make Callbacks Idempotent
+
+```perl
+# Good - safe to call multiple times
+my $on_success = sub {
+    my ($pipeline_id) = @_;
+    my $sth = $dbh->do(q{
+        INSERT INTO pipeline_results (id, status)
+        VALUES (?, 'completed')
+        ON DUPLICATE KEY UPDATE status = 'completed'
+    }, undef, $pipeline_id);
+};
+
+# Bad - fails if called twice
+my $on_success = sub {
+    my ($pipeline_id) = @_;
+    my $sth = $dbh->prepare(q{
+        INSERT INTO pipeline_results (id, status)
+        VALUES (?, 'completed')
+    });
+    $sth->execute($pipeline_id);  # Dies on duplicate key
+};
+```
+
+### 5. Log All Webhook Activity
 
 ```perl
 my $on_success = sub {
+    my ($pipeline_id) = @_;
+    log_entry({
+        type => 'webhook_success',
+        pipeline_id => $pipeline_id,
+        timestamp => time(),
+    });
+    update_status($pipeline_id, 'completed');
+};
+
+my $on_error = sub {
+    my ($pipeline_id, $error) = @_;
+    log_entry({
+        type => 'webhook_error',
+        pipeline_id => $pipeline_id,
+        error => $error,
+        timestamp => time(),
+    });
+    update_status($pipeline_id, 'failed', $error);
+};
+```
+
+### 6. Handle Webhook Timeouts
+
+```perl
+my $on_success = sub {
+    my ($pipeline_id) = @_;
+    
     eval {
         local $SIG{ALRM} = sub { die "Timeout\n" };
         alarm(30);  # 30 second timeout
         
-        # Long-running operation
-        process_pipeline_results($pipeline_id);
+        # Database update (should be fast)
+        update_status($pipeline_id, 'completed');
         
         alarm(0);
     };
     
     if ($@) {
         if ($@ =~ /Timeout/) {
-            warn "Success callback timed out\n";
+            warn "Webhook callback timed out for $pipeline_id\n";
         } else {
-            warn "Error in success callback: $@\n";
+            warn "Error in webhook callback: $@\n";
         }
     }
 };
 ```
 
-### Retry Logic
+## Troubleshooting
+
+### Webhook Not Firing
+
+**Check:**
+1. Webhook URL is publicly accessible
+2. Firewall allows incoming POST requests
+3. HTTPS certificate is valid
+4. `PIPELINE_SHARED_SECRET` matches on both ends
+
+```bash
+# Test webhook URL manually
+curl -X POST "https://your-app.com/api/webhook?action=webhook" \
+  -d "secret=yoursecret&pipelineId=test123&status=completed"
+```
+
+### Pipeline ID Not Received in Callback
+
+**Check:**
+1. Pipeline ID is passed to `execute_pipeline()`
+2. Callback function receives the parameter: `sub { my ($pipeline_id) = @_; }`
+3. Server is sending the `pipelineId` parameter
 
 ```perl
-sub execute_with_retry {
-    my ($callback, $max_attempts) = @_;
-    $max_attempts ||= 3;
-    
-    for my $attempt (1..$max_attempts) {
-        eval {
-            $callback->();
-            return;  # Success
-        };
-        
-        if ($@) {
-            warn "Attempt $attempt failed: $@\n";
-            
-            if ($attempt < $max_attempts) {
-                my $delay = 2 ** $attempt;  # Exponential backoff
-                sleep($delay);
-            } else {
-                die "All attempts failed: $@\n";
-            }
-        }
-    }
+# Debug callback
+sub debug_callback {
+    my ($pipeline_id) = @_;
+    warn "DEBUG: Received pipeline ID: $pipeline_id\n";
+    warn "DEBUG: Number of args: " . scalar(@_) . "\n";
 }
-
-# Usage
-my $on_success = sub {
-    execute_with_retry(sub {
-        process_pipeline_results($pipeline_id);
-    });
-};
 ```
 
-## Best Practices
+### Database Updates Not Happening
 
-### 1. Keep Callbacks Quick
-
-```perl
-# Good - quick operation
-my $on_success = sub {
-    log_event('Pipeline completed');
-};
-
-# Bad - slow operation
-my $on_success = sub {
-    # Processing 1GB file...
-    process_large_file();
-};
-```
-
-### 2. Use Background Jobs
+**Check:**
+1. Database connection is valid
+2. Callback is being called (add logging)
+3. SQL is correct and connection permissions are set
+4. Callback is using the correct database handle
 
 ```perl
-# Better - queue for background processing
 my $on_success = sub {
-    my $job_queue = Job::Queue->new();
-    $job_queue->enqueue({
-        type => 'process_results',
-        pipeline_id => $pipeline_id,
-    });
+    my ($pipeline_id) = @_;
+    warn "DEBUG: Success callback fired for $pipeline_id\n";
     
-    log_event('Pipeline completed, job queued');
-};
-```
-
-### 3. Validate Webhook Input
-
-```perl
-my $client = FileServerSdk::Client->new();
-
-# The client already validates the secret
-# But you can add additional validation
-sub validate_webhook {
-    my $pipeline_id = CGI::param('pipelineId');
-    my $status = CGI::param('status');
-    
-    die "Invalid pipeline ID" unless $pipeline_id =~ /^[a-z0-9]+$/;
-    die "Invalid status" unless $status =~ /^(completed|failed)$/;
-    
-    return 1;
-}
-
-eval {
-    validate_webhook();
-    $client->handle_webhook();
-};
-```
-
-### 4. Log All Webhook Activity
-
-```perl
-my $on_success = sub {
-    log_webhook_event({
-        status => 'success',
-        pipeline_id => $pipeline_id,
-        timestamp => time(),
-        callback_duration => time() - $start_time,
-    });
-};
-
-my $on_error = sub {
-    my ($error) = @_;
-    
-    log_webhook_event({
-        status => 'error',
-        pipeline_id => $pipeline_id,
-        error => $error,
-        timestamp => time(),
-    });
-};
-```
-
-### 5. Handle Idempotency
-
-```perl
-# Webhooks may be called multiple times
-# Use idempotent operations
-my $on_success = sub {
     eval {
-        # Use "INSERT ON DUPLICATE KEY UPDATE" or similar
-        my $result = $dbh->do(q{
-            INSERT INTO pipeline_results (pipeline_id, status, timestamp)
-            VALUES (?, 'completed', now())
-            ON DUPLICATE KEY UPDATE
-            status = 'completed', timestamp = now()
-        }, undef, $pipeline_id);
+        warn "DEBUG: About to update database\n";
+        my $result = $dbh->do(
+            "UPDATE jobs SET status = 'completed' WHERE job_id = ?",
+            undef,
+            $pipeline_id
+        );
+        warn "DEBUG: Update result: $result\n";
     };
+    
+    if ($@) {
+        warn "DEBUG: Error in callback: $@\n";
+    }
 };
 ```
