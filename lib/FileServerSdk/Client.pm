@@ -288,19 +288,19 @@ sub execute_pipeline {
 
 sub cleanup_pipeline {
     my ( $self, $pipeline ) = @_;
-
     die "pipeline is required\n" unless defined $pipeline;
-
     my @files = $pipeline->get_files();
 
+    my %seen;
+    @files = grep { !$seen{$_}++ } @files;
+
     foreach my $file (@files) {
-        eval { $self->delete_file( $file->{bucket}, $file->{key} ); };
+        my ( $bucket, $key ) = split( '/', $file, 2 );
+        eval { $self->delete_file( $bucket, $key ); };
         if ($@) {
-            warn
-"Failed to delete file from bucket '$file->{bucket}' with key '$file->{key}': $@\n";
+            warn "Failed to delete file '$file': $@\n";
         }
     }
-
     return 1;
 }
 
