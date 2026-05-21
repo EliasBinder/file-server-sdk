@@ -32,4 +32,4 @@ print Dumper($json);
 
 my $result = $client->execute_pipeline($pipeline);
 
-print "Pipeline execution result:\n";
+print "Pipeline fired!\n";

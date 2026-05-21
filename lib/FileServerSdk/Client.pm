@@ -237,17 +237,23 @@ sub execute_pipeline {
     # Convert the pipeline to JSON
     my $pipeline_json = $pipeline->to_json();
 
+    my $webhook_json;
+    if ( defined $webhook_url ) {
+        $webhook_json = {
+            method => 'POST',
+            url    => $webhook_url,
+        };
+    }
+
     # Build request body
+    # Add "webhook" field only if webhook_url is provided, otherwise omit it
     my %req_body = ( steps => $pipeline_json, );
 
     # Add webhook info if provided
     if ( defined $webhook_url ) {
         $req_body{webhook} = {
-            method            => 'POST',
-            url               => $webhook_url,
-            additionalHeaders => {
-                'Content-Type' => 'application/json',
-            }
+            method => 'POST',
+            url    => $webhook_url,
         };
     }
 
@@ -350,6 +356,8 @@ sub handle_webhook {
     if ( $status eq 'completed' ) {
         if ( defined $callbacks->{on_success} ) {
             $callbacks->{on_success}->();
+            print "Content-Type: application/json\n\n";
+            print "{\"success\": true}\n";
             return 1;
         }
     }
@@ -357,6 +365,8 @@ sub handle_webhook {
         my $error = CGI::param('error') || 'Unknown error';
         if ( defined $callbacks->{on_error} ) {
             $callbacks->{on_error}->($error);
+            print "Content-Type: application/json\n\n";
+            print "{\"success\": true}\n";
             return 1;
         }
     }
