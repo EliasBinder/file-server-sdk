@@ -155,6 +155,36 @@ my $pipeline_id = $client->execute_pipeline(
 );
 ```
 
+### With Pipeline Metadata
+
+Metadata can be attached to a pipeline execution. This metadata will be returned in the webhook callbacks for both successful and failed pipeline completions, allowing you to correlate pipeline executions with your application state:
+
+```perl
+my $metadata = {
+    user_id => 12345,
+    job_type => 'document_processing',
+    request_id => 'req-abc123',
+    custom_field => 'custom_value'
+};
+
+my $pipeline_id = $client->execute_pipeline(
+    $pipeline,
+    'https://your-server.com/webhook?action=webhook',
+    $metadata
+);
+```
+
+You can also combine a pipeline ID with metadata:
+
+```perl
+my $pipeline_id = $client->execute_pipeline(
+    'my-pipeline-123',      # Explicit pipeline ID
+    $pipeline,
+    'https://your-server.com/webhook?action=webhook',
+    $metadata
+);
+```
+
 ### Error Handling
 
 ```perl
@@ -165,6 +195,32 @@ if ($@) {
     die "Failed to execute pipeline: $@\n";
 }
 ```
+
+### Method Signature
+
+The `execute_pipeline` method supports the following signatures:
+
+```perl
+# Without webhook or metadata
+$client->execute_pipeline($pipeline);
+
+# With pipeline ID
+$client->execute_pipeline($pipeline_id, $pipeline);
+
+# With webhook URL
+$client->execute_pipeline($pipeline, $webhook_url);
+
+# With pipeline ID and webhook URL
+$client->execute_pipeline($pipeline_id, $pipeline, $webhook_url);
+
+# With metadata (attached to pipeline)
+$client->execute_pipeline($pipeline, $webhook_url, $metadata);
+
+# With pipeline ID and metadata
+$client->execute_pipeline($pipeline_id, $pipeline, $webhook_url, $metadata);
+```
+
+The `$metadata` parameter should be a hash reference containing any application-specific data you want to associate with the pipeline execution.
 
 ## Advanced Examples
 

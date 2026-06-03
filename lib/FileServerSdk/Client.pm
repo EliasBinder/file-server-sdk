@@ -161,12 +161,18 @@ sub get_metadata {
     die "bucket is required\n" unless defined $bucket;
     die "key is required\n"    unless defined $key;
 
+    my $secret = $self->{config}->{pipeline_shared_secret};
+
     # Make a HTTP request to the metadata endpoint
     my $response = HTTP::Tiny->new->request(
         'GET',
         $self->{config}->{metadata_endpoint}
-          . "?bucket=$bucket&key=$key&secret=$self->{config}->{pipeline_shared_secret}",
+          . "?bucket=$bucket&key=$key&secret=$secret",
     );
+
+    warn "Metadata req url:"
+      . $self->{config}->{metadata_endpoint}
+      . "?bucket=$bucket&key=$key&secret=$secret\n";
 
     if ( $response->{success} ) {
         my $metadata = eval { $self->{json}->decode( $response->{content} ) };
@@ -195,10 +201,11 @@ sub set_metadata {
     }
 
     # Make a HTTP request to the metadata endpoint
+    my $secret   = $self->{config}->{pipeline_shared_secret};
     my $response = HTTP::Tiny->new->request(
         'PATCH',
         $self->{config}->{metadata_endpoint}
-          . "?bucket=$bucket&key=$key&secret=$self->{config}->{pipeline_shared_secret}",
+          . "?bucket=$bucket&key=$key&secret=$secret",
         {
             headers => { 'Content-Type' => 'application/json' },
             content => $metadata_json,
@@ -216,21 +223,13 @@ sub set_metadata {
 }
 
 sub execute_pipeline {
-    my ( $self, $pipeline_id, $pipeline, $webhook_url ) = @_;
+    my ( $self, $pipeline_id, $pipeline, $webhook_url, $metadata ) = @_;
 
     # Validate required inputs
     die "pipeline is required\n" unless defined $pipeline;
 
     # Convert the pipeline to JSON
     my $pipeline_json = $pipeline->to_json();
-
-    my $webhook_json;
-    if ( defined $webhook_url ) {
-        $webhook_json = {
-            method => 'POST',
-            url    => $webhook_url,
-        };
-    }
 
     # Build request body
     # Add "webhook" field only if webhook_url is provided, otherwise omit it
@@ -246,6 +245,11 @@ sub execute_pipeline {
             method => 'POST',
             url    => $webhook_url,
         };
+    }
+
+    # Add metadata if provided
+    if ( defined $metadata ) {
+        $req_body{metadata} = $metadata;
     }
 
     my $json_body = $self->{json}->encode( \%req_body );
@@ -320,22 +324,32 @@ sub handle_webhook {
     # Read parameters from the request
     my $pipelineId = CGI::param('pipelineId');
     my $status     = CGI::param('status');
+    my $metadata   = CGI::param('metadata') || '{}';
 
     unless ( defined $pipelineId && defined $status ) {
         warn "Missing required webhook parameters\n";
         return 0;
     }
 
+    # Decode metadata JSON if provided
+    my $metadata_ref;
+    eval { $metadata_ref = $self->{json}->decode($metadata); };
+    if ($@) {
+        warn "Failed to decode metadata JSON: $@\n";
+        $metadata_ref = {};
+    }
+
     # Execute appropriate callback based on status
     if ( $status eq 'completed' ) {
-        $on_success->($pipelineId) if defined $on_success;
+        $on_success->( $pipelineId, $metadata_ref ) if defined $on_success;
         print "Content-Type: application/json\n\n";
         print "{\"success\": true}\n";
         return 1;
     }
     else {
         my $error = CGI::param('error') || 'Unknown error';
-        $on_failed->( $pipelineId, $error );
+        $on_failed->( $pipelineId, $error, $metadata_ref )
+          if defined $on_failed;
         print "Content-Type: application/json\n\n";
         print "{\"success\": true}\n";
         return 1;

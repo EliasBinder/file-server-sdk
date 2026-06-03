@@ -78,6 +78,7 @@ use strict;
 use warnings;
 use CGI qw/:standard -utf8/;
 use FileServerSdk::Client;
+use JSON;
 
 my $action = param('action');
 my $client = FileServerSdk::Client->new();
@@ -86,16 +87,24 @@ if ($action eq 'webhook') {
     # Handle the webhook callback
     $client->handle_webhook(
         sub {
-            my ($pipeline_id) = @_;
+            my ($pipeline_id, $metadata) = @_;
             # Success callback
+            # $metadata is a hash reference with any data submitted during execute_pipeline
             print STDERR "Pipeline $pipeline_id completed successfully\n";
-            update_pipeline_record($pipeline_id, 'completed');
+            if (defined $metadata) {
+                print STDERR "Metadata: " . JSON->new->encode($metadata) . "\n";
+            }
+            update_pipeline_record($pipeline_id, 'completed', $metadata);
         },
         sub {
-            my ($pipeline_id, $error) = @_;
+            my ($pipeline_id, $error, $metadata) = @_;
             # Error callback
+            # $metadata is available even on failure
             print STDERR "Pipeline $pipeline_id failed: $error\n";
-            update_pipeline_record($pipeline_id, 'failed', $error);
+            if (defined $metadata) {
+                print STDERR "Metadata: " . JSON->new->encode($metadata) . "\n";
+            }
+            update_pipeline_record($pipeline_id, 'failed', $metadata, $error);
         }
     );
 } else {
@@ -103,9 +112,10 @@ if ($action eq 'webhook') {
 }
 
 sub update_pipeline_record {
-    my ($pipeline_id, $status, $error) = @_;
+    my ($pipeline_id, $status, $metadata, $error) = @_;
     # Update in your database
-    # e.g., UPDATE pipelines SET status = ?, error = ? WHERE pipeline_id = ?
+    # Use $metadata to correlate with your application state
+    # e.g., UPDATE pipelines SET status = ? WHERE user_id = ? AND job_type = ?
 }
 ```
 
@@ -124,15 +134,15 @@ sub pipeline_webhook {
         
         $client->handle_webhook(
             sub {
-                my ($pipeline_id) = @_;
+                my ($pipeline_id, $metadata) = @_;
                 $c->app->log->info("Pipeline $pipeline_id completed");
-                update_db($pipeline_id, 'completed');
+                update_db($pipeline_id, 'completed', $metadata);
                 $success = 1;
             },
             sub {
-                my ($pipeline_id, $error) = @_;
+                my ($pipeline_id, $error, $metadata) = @_;
                 $c->app->log->error("Pipeline $pipeline_id failed: $error");
-                update_db($pipeline_id, 'failed', $error);
+                update_db($pipeline_id, 'failed', $metadata, $error);
                 $success = 1;
             }
         );
@@ -154,8 +164,8 @@ sub pipeline_webhook {
 }
 
 sub update_db {
-    my ($pipeline_id, $status, $error) = @_;
-    # Update database
+    my ($pipeline_id, $status, $metadata, $error) = @_;
+    # Update database with $metadata to correlate pipeline with application state
 }
 
 1;
@@ -182,15 +192,15 @@ sub webhook_POST {
     
     $client->handle_webhook(
         sub {
-            my ($pipeline_id) = @_;
+            my ($pipeline_id, $metadata) = @_;
             $c->log->info("Pipeline $pipeline_id completed");
-            update_db($pipeline_id, 'completed');
+            update_db($pipeline_id, 'completed', $metadata);
             $success = 1;
         },
         sub {
-            my ($pipeline_id, $error) = @_;
+            my ($pipeline_id, $error, $metadata) = @_;
             $c->log->error("Pipeline $pipeline_id failed: $error");
-            update_db($pipeline_id, 'failed', $error);
+            update_db($pipeline_id, 'failed', $metadata, $error);
             $success = 1;
         }
     );
@@ -204,8 +214,8 @@ sub webhook_POST {
 }
 
 sub update_db {
-    my ($pipeline_id, $status, $error) = @_;
-    # Update database
+    my ($pipeline_id, $status, $metadata, $error) = @_;
+    # Update database with $metadata to correlate pipeline with application state
 }
 
 __PACKAGE__->meta->make_immutable;
@@ -255,7 +265,14 @@ my $pipeline = FileServerSdk::SequentialPipeline->new()
 
 my $webhook_url = 'https://your-app.com/api/webhook?action=webhook&secret='.$ENV{PIPELINE_SHARED_SECRET};
 
-# Step 3: Execute with webhook
+# Step 3: Prepare metadata to pass to pipeline
+my $metadata = {
+    user_id => $user_id,
+    output_key => $output_key,
+    job_type => 'pdf_merge',
+};
+
+# Step 4: Execute with webhook and metadata
 my $result = $client->execute_pipeline(
     $pipeline_id,
     $pipeline,
@@ -275,7 +292,7 @@ my $dbh = DBI->connect('dbi:mysql:myapp', 'user', 'pass');
 my $client = FileServerSdk::Client->new();
 
 my $on_success = sub {
-    my ($pipeline_id) = @_;
+    my ($pipeline_id, $metadata) = @_;
     
     eval {
         # Update status
@@ -334,17 +351,18 @@ $client->handle_webhook($on_success, $on_error);
 
 ```perl
 my $on_success = sub {
-    my ($pipeline_id) = @_;
+    my ($pipeline_id, $metadata) = @_;
     
     eval {
         # Get pipeline details
         my $job = get_pipeline_job($pipeline_id);
         
-        # Log event
+        # Log event with metadata
         log_event({
             event_type => 'pipeline_success',
             pipeline_id => $pipeline_id,
             user_id => $job->{user_id},
+            metadata => $metadata,
             timestamp => time(),
             duration => time() - $job->{created_at},
         });
@@ -363,16 +381,17 @@ my $on_success = sub {
 };
 
 my $on_error = sub {
-    my ($pipeline_id, $error) = @_;
+    my ($pipeline_id, $error, $metadata) = @_;
     
     eval {
         my $job = get_pipeline_job($pipeline_id);
         
-        # Log event
+        # Log event with metadata for better context
         log_event({
             event_type => 'pipeline_error',
             pipeline_id => $pipeline_id,
             user_id => $job->{user_id},
+            metadata => $metadata,
             timestamp => time(),
             error => $error,
         });
@@ -430,6 +449,67 @@ The webhook is verified using:
 2. **HTTPS**: Use HTTPS in production for security
 3. **POST method**: Webhooks are always POST requests
 4. **Idempotency**: Design callbacks to be idempotent (safe to call multiple times)
+
+## Using Metadata in Webhooks
+
+Metadata provides a way to attach application-specific context to pipeline executions. When you execute a pipeline with metadata, that metadata is returned in the webhook callbacks, allowing you to correlate pipeline events with your application state without requiring database lookups.
+
+### Submitting Metadata
+
+Pass a hash reference as the fourth parameter to `execute_pipeline`:
+
+```perl
+my $metadata = {
+    user_id => $user_id,
+    job_id => $job_id,
+    request_id => 'req-abc123',
+    custom_context => 'any_value',
+};
+
+my $pipeline_id = $client->execute_pipeline(
+    $pipeline,
+    'https://your-app.com/webhook',
+    $metadata  # Pass metadata as fourth parameter
+);
+```
+
+### Accessing Metadata in Callbacks
+
+The metadata is passed to both success and failure callbacks:
+
+```perl
+$client->handle_webhook(
+    sub {
+        my ($pipeline_id, $metadata) = @_;
+        
+        # $metadata is a hash reference containing the data you submitted
+        if (defined $metadata) {
+            my $user_id = $metadata->{user_id};
+            my $job_id = $metadata->{job_id};
+            
+            # Use metadata for correlation without DB lookup
+            update_job_status($job_id, 'completed');
+        }
+    },
+    sub {
+        my ($pipeline_id, $error, $metadata) = @_;
+        
+        # Metadata is also available on failure
+        if (defined $metadata) {
+            notify_user($metadata->{user_id}, 
+                "Job $metadata->{job_id} failed: $error");
+        }
+    }
+);
+```
+
+### Metadata Best Practices
+
+1. **Keep it Small**: Store only necessary identifiers and context
+2. **Use Simple Values**: Prefer strings and numbers over complex structures
+3. **Document Your Keys**: Clearly define what metadata fields you use
+4. **Handle Missing Metadata**: Always check if metadata is defined before using it
+5. **Avoid Sensitive Data**: Don't store passwords or tokens in metadata
 
 ## Complete Example: Document Processing Application
 

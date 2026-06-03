@@ -129,14 +129,15 @@ $client->set_metadata('my-bucket', 'documents/file.pdf', {
 
 ### Pipeline Operations
 
-#### `execute_pipeline($pipeline, [$pipeline_id, $webhook_url])`
+#### `execute_pipeline($pipeline, [$pipeline_id, $webhook_url, $metadata])`
 
-Executes a pipeline. For webhook scenarios, you should pre-generate and pass a pipeline ID.
+Executes a pipeline. For webhook scenarios, you should pre-generate and pass a pipeline ID. Metadata can be attached to track custom application context through the pipeline execution lifecycle.
 
 **Parameters:**
 - `$pipeline` (object, required): SequentialPipeline or ParallelPipeline instance
 - `$pipeline_id` (string, optional): Unique pipeline ID. If omitted, one is generated automatically.
 - `$webhook_url` (string, optional): URL for webhook callbacks
+- `$metadata` (hashref, optional): Application-specific metadata to attach to the pipeline. This will be returned in webhook callbacks.
 
 **Returns:** Pipeline ID (string)
 
@@ -175,13 +176,14 @@ Processes incoming webhook requests from the pipeline server.
 - `$on_error` (code ref, optional): Callback for pipeline failure
 
 **Callback Signatures:**
-- Success: `sub { my ($pipeline_id) = @_; }` - Receives pipeline ID
-- Error: `sub { my ($pipeline_id, $error) = @_; }` - Receives pipeline ID and error message
+- Success: `sub { my ($pipeline_id, $metadata) = @_; }` - Receives pipeline ID and metadata hash reference
+- Error: `sub { my ($pipeline_id, $error, $metadata) = @_; }` - Receives pipeline ID, error message, and metadata hash reference
 
 **CGI Parameters Expected (automatically validated):**
 - `secret`: Shared secret (validated against `PIPELINE_SHARED_SECRET`)
 - `pipelineId`: Pipeline ID from server
 - `status`: Pipeline status ('completed', 'failed', etc.)
+- `metadata`: Application metadata as JSON string (optional, defaults to '{}')
 - `error`: Error message (only if status indicates failure)
 
 **Returns:** 1 on success, 0 on validation failure
@@ -191,12 +193,14 @@ Processes incoming webhook requests from the pipeline server.
 if ($action eq 'webhook') {
     $client->handle_webhook(
         sub {
-            my ($pipeline_id) = @_;
-            update_database($pipeline_id, 'completed');
+            my ($pipeline_id, $metadata) = @_;
+            # $metadata contains the data submitted during execute_pipeline
+            update_database($pipeline_id, 'completed', $metadata);
         },
         sub {
-            my ($pipeline_id, $error) = @_;
-            update_database($pipeline_id, 'failed', $error);
+            my ($pipeline_id, $error, $metadata) = @_;
+            # Metadata is also passed on failure
+            update_database($pipeline_id, 'failed', $error, $metadata);
         }
     );
 }

@@ -22,7 +22,7 @@ sub new {
     return $self;
 }
 
-sub add_task_step {
+sub add_task {
     my ( $self, $step ) = @_;
 
     die "step is required\n"                unless defined $step;
@@ -32,7 +32,7 @@ sub add_task_step {
     return $self;    # Allow method chaining
 }
 
-sub add_parallel_pipeline_step {
+sub add_parallel_pipeline {
     my ( $self, $pipeline ) = @_;
 
     die "pipeline is required\n" unless defined $pipeline;

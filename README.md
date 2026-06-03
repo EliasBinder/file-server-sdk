@@ -310,17 +310,17 @@ Sets metadata for a file.
 $client->set_metadata('my_bucket', 'path/to/file.pdf', { key => 'value' });
 ```
 
-#### `execute_pipeline($pipeline, [$pipeline_id, $webhook_url])`
+#### `execute_pipeline($pipeline, [$pipeline_id, $webhook_url, $metadata])`
 
-Executes a pipeline. Optionally accepts a pipeline ID and webhook URL.
+Executes a pipeline. Optionally accepts a pipeline ID, webhook URL, and metadata.
 
 **Parameters:**
 - `$pipeline` (object, required): SequentialPipeline or ParallelPipeline instance
 - `$pipeline_id` (string, optional): Unique pipeline ID (generated if not provided)
 - `$webhook_url` (string, optional): URL for webhook callbacks
+- `$metadata` (hashref, optional): Application-specific data to attach to the pipeline
 
 **Returns:** Pipeline ID (string)
-
 ```perl
 # Without webhooks (auto-generated ID)
 my $pipeline_id = $client->execute_pipeline($pipeline);
@@ -333,6 +333,14 @@ my $result = $client->execute_pipeline(
     'https://your-server.com/webhook?action=webhook'
 );
 print "Pipeline ID: $result\n";
+
+# With metadata for correlation
+my $metadata = { user_id => 123, job_id => 'job-456' };
+my $result = $client->execute_pipeline(
+    $pipeline,
+    'https://your-server.com/webhook?action=webhook',
+    $metadata
+);
 ```
 
 #### `handle_webhook($on_success, $on_error)`
@@ -344,19 +352,21 @@ Processes incoming webhook requests from the pipeline server.
 - `$on_error` (code ref, optional): Callback for pipeline failure
 
 **Callback Signatures:**
-- Success: `sub { my ($pipeline_id) = @_; }` (receives pipeline ID)
-- Error: `sub { my ($pipeline_id, $error) = @_; }` (receives pipeline ID and error message)
+- Success: `sub { my ($pipeline_id, $metadata) = @_; }` (receives pipeline ID and metadata)
+- Error: `sub { my ($pipeline_id, $error, $metadata) = @_; }` (receives pipeline ID, error message, and metadata)
 
 ```perl
 if ($action eq 'webhook') {
     $client->handle_webhook(
         sub {
-            my ($pipeline_id) = @_;
+            my ($pipeline_id, $metadata) = @_;
             print "Pipeline $pipeline_id completed!\n";
+            # $metadata contains any data submitted during execute_pipeline
         },
         sub {
-            my ($pipeline_id, $error) = @_;
+            my ($pipeline_id, $error, $metadata) = @_;
             print "Pipeline $pipeline_id failed: $error\n";
+            # $metadata is also available on failure
         }
     );
 }
