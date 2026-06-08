@@ -291,21 +291,24 @@ sub execute_pipeline {
 }
 
 sub cleanup_pipeline {
-    my ( $self, $pipeline ) = @_;
-    die "pipeline is required\n" unless defined $pipeline;
-    my @files = $pipeline->get_files();
+    my ( $self, $pipelineId ) = @_;
+    die "pipelineId is required\n" unless defined $pipelineId;
 
-    my %seen;
-    @files = grep { !$seen{$_}++ } @files;
+    my $response = HTTP::Tiny->new->request(
+        'DELETE',
+        $self->{config}->{pipeline_endpoint}
+          . "?pipelineId=$pipelineId&secret="
+          . $self->{config}->{pipeline_shared_secret},
+    );
 
-    foreach my $file (@files) {
-        my ( $bucket, $key ) = split( '/', $file, 2 );
-        eval { $self->delete_file( $bucket, $key ); };
-        if ($@) {
-            warn "Failed to delete file '$file': $@\n";
-        }
+    if ( $response->{success} ) {
+        return 1;
     }
-    return 1;
+    else {
+        die "Failed to cleanup pipeline: "
+          . $response->{status} . " "
+          . $response->{reason} . "\n";
+    }
 }
 
 sub handle_webhook {
