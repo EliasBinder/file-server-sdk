@@ -252,7 +252,10 @@ sub execute_pipeline {
         $req_body{metadata} = $metadata;
     }
 
+    # Enable UTF-8 encoding for JSON content
+    $self->{json}->utf8(1);
     my $json_body = $self->{json}->encode( \%req_body );
+    $self->{json}->utf8(0);    # Reset UTF-8 flag to default
 
     # Send the request to the file server
     my $response = HTTP::Tiny->new->request(
